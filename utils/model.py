@@ -8,6 +8,7 @@ from icefall.hifigan.config import v1,v2,v3
 from icefall.hifigan.models import Generator as HiFiGAN
 from icefall.hifigan.denoiser import Denoiser
 from icefall.tokenizer import Tokenizer
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 import sys, pathlib
 from icefall.models.matcha_tts import MatchaTTS
@@ -82,14 +83,24 @@ class Model:
 		}
 
 	def Forward(self, encoded: dict):
-		return self.model.synthesise(
-			encoded["x"],
-			encoded["x_lengths"],
-			n_timesteps=self.n_timesteps,
-			temperature=self.temperature,
-			spks=None,
-			length_scale=self.length_scale,
-		)
+		if isinstance(self.model, DDP):
+			return self.model.module.synthesise(
+				encoded["x"],
+				encoded["x_lengths"],
+				n_timesteps=self.n_timesteps,
+				temperature=self.temperature,
+				spks=None,
+				length_scale=self.length_scale,
+			)
+		else:
+			return self.model.synthesise(
+				encoded["x"],
+				encoded["x_lengths"],
+				n_timesteps=self.n_timesteps,
+				temperature=self.temperature,
+				spks=None,
+				length_scale=self.length_scale,
+			)
 
 	def __call__(self, text: str):
 		text_processed = tokens.process_text(text=text, tokenizer=self.tokenizer, device=self.device)
