@@ -72,6 +72,24 @@ class Model:
 		if IsWindows:
 			pathlib.PosixPath = temp
 		return checkpoint
+	
+	def Encode(self, text:str):
+		text_processed = tokens.process_text(text=text, tokenizer=self.tokenizer, device=self.device)
+		return {
+			"text": text,
+			"x": text_processed["x"],
+			"x_lengths": text_processed["x_lengths"],
+		}
+
+	def Forward(self, encoded: dict):
+		return self.model.synthesise(
+			encoded["x"],
+			encoded["x_lengths"],
+			n_timesteps=self.n_timesteps,
+			temperature=self.temperature,
+			spks=None,
+			length_scale=self.length_scale,
+		)
 
 	def __call__(self, text: str):
 		text_processed = tokens.process_text(text=text, tokenizer=self.tokenizer, device=self.device)
@@ -175,12 +193,12 @@ class ModelBuilder:
 		return model
 	
 class MelDecoder:
-	def __init__(self, vocoder_filename: str):
+	def __init__(self, vocoder_filename: str, device="cpu"):
 		self.vocoder_filename = vocoder_filename
 
-		self.load_vocoder_and_denoiser()
+		self.load_vocoder_and_denoiser(device=device)
 
-	def load_vocoder_and_denoiser(self):
+	def load_vocoder_and_denoiser(self, device="cpu"):
 		if self.vocoder_filename.endswith("v1"):
 			h = AttributeDict(v1)
 		elif self.vocoder_filename.endswith("v2"):
@@ -197,8 +215,9 @@ class MelDecoder:
 		_ = hifigan.eval()
 		hifigan.remove_weight_norm()
 		self.vocoder = hifigan
-
+		self.vocoder.to(device)
 		self.denoiser = Denoiser(self.vocoder, mode="zeros")
+		self.denoiser.to(device)
 
 	def UploadToDevice(self, device):
 		self.vocoder.to(device)

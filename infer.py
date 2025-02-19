@@ -3,8 +3,7 @@ import utils
 import utils.model
 import soundfile as sf
 
-# device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-device = 'cpu'
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 print("Using device: {}".format(device))
 
 def parse_args(args = None):
@@ -45,7 +44,7 @@ def parse_args(args = None):
 @torch.inference_mode()
 def main(args):
 	builder = utils.model.ModelBuilder()
-	decoder = utils.model.MelDecoder(args.vocoder)
+	decoder = utils.model.MelDecoder(args.vocoder, device)
 
 	token_filename = os.path.join(args.dataset_dir, 'tokens.txt')
 	builder.LoadTokenizer(token_filename)
@@ -58,7 +57,7 @@ def main(args):
 	model = builder.BuildModel()
 	model.LoadCheckpoint(args.model)
 	model.UploadToDevice(device)
-	decoder.UploadToDevice(device)
+	# decoder.UploadToDevice(device)
 
 	output = model(args.text)
 	waveform = decoder(output["mel"])

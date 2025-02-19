@@ -156,13 +156,13 @@ def get_parser():
 	parser.add_argument(
 		"--learning-rate",
 		type=float,
-		default=2e-4,
+		default=1.3e-4,
 		help="Learning rate for Adam optimizer.",
 	)
 	parser.add_argument(
 		"--log-n-audio",
 		type=int,
-		default=3,
+		default=2,
 		help="Log audio in validation set during training."
 	)
 
@@ -445,14 +445,15 @@ def compute_validation_loss(
 def infer_one_batch(
 	writer: SummaryWriter,
 	params: AttributeDict,
-	valid_text: typing.List[str],
+	valid_text: typing.List[dict],
 	model_wrapper: ModelWrapper,
 	vocoder: Union[MelDecoder, None]
 ):
+	logging.info("Start infer one batch...")
 	for idx, text in enumerate(valid_text):
-		output = model_wrapper(text)
-		waveform = vocoder(output["mel"].cpu()) # vocoder has problems running on gpu
-		writer.add_audio(f"valid/audio{idx}", waveform, params.batch_idx_train, sample_rate=params.data_args.sampling_rate)
+		output = model_wrapper.Forward(text) # text is { "x": [xxx], "x_length": [xxx], "text": "xxx"}
+		waveform = vocoder(output["mel"]) # vocoder has problems running on gpu
+		writer.add_audio(f"valid/audio{idx}", waveform.detach().cpu(), params.batch_idx_train, sample_rate=params.data_args.sampling_rate)
 
 def train_one_epoch(
 	params: AttributeDict,
@@ -466,7 +467,7 @@ def train_one_epoch(
 	world_size: int = 1,
 	rank: int = 0,
 	vocoder: Union[MelDecoder, None] = None,
-	valid_text: Union[typing.List[str], None] = None,
+	valid_text: Union[typing.List[dict], None] = None,
 ) -> None:
 	"""Train the model for one epoch.
 
@@ -617,7 +618,6 @@ def train_one_epoch(
 				world_size=world_size,
 				rank=rank,
 			)
-			model.train()
 			logging.info(f"Epoch {params.cur_epoch}, validation: {valid_info}")
 			logging.info(
 				"Maximum memory allocated so far is "
@@ -638,6 +638,8 @@ def train_one_epoch(
 						model_wrapper = model_wrapper, 
 						vocoder=vocoder
 					)
+					del model_wrapper
+			model.train()
 
 	loss_value = tot_loss["tot_loss"] / tot_loss["samples"]
 	params.train_loss = loss_value
@@ -663,7 +665,7 @@ def run(rank, world_size, args):
 		tb_writer = None
 
 	device = torch.device("cpu")
-	if torch.cuda.is_available():
+	if not IsWindows and torch.cuda.is_available(): # my windows cannot install cuda k2 library
 		device = torch.device("cuda", rank)
 	logging.info(f"Device: {device}")
 
@@ -699,7 +701,7 @@ def run(rank, world_size, args):
 		temp = pathlib.PosixPath
 		pathlib.PosixPath = pathlib.WindowsPath
 
-	if args.pretrained_checkpoint is not None:
+	if params.start_epoch == 1 and args.pretrained_checkpoint is not None:
 		logging.info(f"Loading pretrained checkpoint {args.pretrained_checkpoint}")
 		checkpoints = load_checkpoint(args.pretrained_checkpoint, model=model)
 	else:
@@ -712,7 +714,7 @@ def run(rank, world_size, args):
 
 	melDecoder: Union[MelDecoder, None] = None
 	if args.vocoder_checkpoint is not None:
-		melDecoder = MelDecoder(args.vocoder_checkpoint)
+		melDecoder = MelDecoder(args.vocoder_checkpoint, device)
 
 	if world_size > 1:
 		logging.info("Using DDP")
@@ -731,15 +733,17 @@ def run(rank, world_size, args):
 	valid_dl = baker_zh.valid_dataloaders(valid_cuts)
 
 	valid_text_batch = [ x["text"] for x in itertools.islice(iter(valid_dl), args.log_n_audio) ]
-	valid_text: typing.List[str] = []
+	valid_text: typing.List[dict] = []
+	model_wrapper = ModelWrapper(tokenizer, model, None)
 	for i in valid_text_batch:
 		for j in i:
-			valid_text.append(j)
+			valid_text.append(model_wrapper.Encode(j))
 			if len(valid_text) >= args.log_n_audio:
 				break
-	if tb_writer is not None:
-		for i, text in enumerate(valid_text):
-			tb_writer.add_text(f"valid/text{i}", text)
+	if tb_writer is not None and rank == 0:
+		for i, item in enumerate(valid_text):
+			tb_writer.add_text(f"valid/text{i}", item["text"])
+	del model_wrapper
 
 	scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
 	if checkpoints and "grad_scaler" in checkpoints:
@@ -782,7 +786,7 @@ def run(rank, world_size, args):
 				scaler=scaler,
 				rank=rank,
 			)
-			if args.keep_nepochs != -1:
+			if  rank == 0 and args.keep_nepochs != -1:
 				model_list = [ x for x in os.listdir(str(params.exp_dir)) if x.startswith("epoch-") and x.endswith(".pt") ]
 				model_list = sorted(model_list, key=lambda x: int(x[len('epoch-'):-3]))
 				if len(model_list) > args.keep_nepochs:
