@@ -156,7 +156,7 @@ def get_parser():
 	parser.add_argument(
 		"--learning-rate",
 		type=float,
-		default=1.3e-4,
+		default=2e-4,
 		help="Learning rate for Adam optimizer.",
 	)
 	parser.add_argument(
