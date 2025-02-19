@@ -1,0 +1,6 @@
+/assets/dataset
+/assets/checkpoint
+/assets/train
+/**/__pycache__
+/**/*.egg-info
+/*.wav
