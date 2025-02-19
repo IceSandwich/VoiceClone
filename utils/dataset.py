@@ -4,6 +4,7 @@ import typing
 import random
 from lhotse import Recording, RecordingSet, SupervisionSegment, CutSet
 from lhotse.supervision import SupervisionSet
+import re
 
 # 数据集下是：
 # wav_folder
@@ -12,6 +13,10 @@ from lhotse.supervision import SupervisionSet
 # - ...
 # - 100.wav
 # wav的名字是字幕的行号
+
+def contains_alphanumeric(s):
+    # 使用正则表达式检查字符串是否包含阿拉伯数字或英文字母
+    return bool(re.search(r'[a-zA-Z0-9]', s))
 
 class RawDataset:
 	def __init__(self, args):
@@ -71,6 +76,10 @@ class RawDataset:
 		self.sampling_rate = 100000
 
 		for idx, (audio_path, audio_filename, transcription) in enumerate(zip(audio_paths, audio_filenames, transcription_lines)):
+			if contains_alphanumeric(transcription):
+				print(f"Skip {transcription}")
+				continue
+
 			# Create a Recording object
 			recording = Recording.from_file(audio_path)
 			self.sampling_rate = min(self.sampling_rate, recording.sampling_rate)	
