@@ -247,14 +247,14 @@ class BakerZhTtsDataModule:
                 f_max=8000,
             )
             validate = SpeechSynthesisDataset(
-                return_text=False,
+                return_text=True,
                 return_tokens=True,
                 feature_input_strategy=OnTheFlyFeatures(MatchaFbank(config)),
                 return_cuts=self.args.return_cuts,
             )
         else:
             validate = SpeechSynthesisDataset(
-                return_text=False,
+                return_text=True,
                 return_tokens=True,
                 feature_input_strategy=eval(self.args.input_strategy)(),
                 return_cuts=self.args.return_cuts,

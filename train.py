@@ -1,72 +1,81 @@
-﻿import argparse, torch, logging, os, shutil
-from icefall.tts_datamodule import BakerZhTtsDataModule
-from icefall.checkpoint import save_checkpoint
-from icefall.utils import MetricsTracker
-from lhotse.utils import fix_random_seed
-from torch.cuda.amp import GradScaler, autocast
-from torch.utils.tensorboard import SummaryWriter
-import utils
-import utils.model
+#!/usr/bin/env python3
+# Copyright         2024  Xiaomi Corp.        (authors: Fangjun Kuang)
+
+
+import argparse
+import json
+import logging
+import os
 import typing
+from pathlib import Path
+from shutil import copyfile
+from typing import Any, Dict, Optional, Union
+import itertools
 
-device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+# import before everything
+import piper_phonemize
 
-def parse_args(args):
-	parser = argparse.ArgumentParser()
+import k2
+import torch
+import torch.multiprocessing as mp
+import torch.nn as nn
+from lhotse.utils import fix_random_seed
+from icefall.model import fix_len_compatibility
+from icefall.models.matcha_tts import MatchaTTS
+from icefall.tokenizer import Tokenizer
+from torch.cuda.amp import GradScaler, autocast
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim import Optimizer
+from torch.utils.tensorboard import SummaryWriter
+from icefall.tts_datamodule import BakerZhTtsDataModule
+from icefall.utils import MetricsTracker
+
+from icefall.checkpoint import load_checkpoint, save_checkpoint
+from icefall.dist import cleanup_dist, setup_dist
+from icefall.env import get_env_info
+from icefall.utils import AttributeDict, setup_logger, str2bool
+import torch.utils.data
+from utils.model import Model as ModelWrapper, MelDecoder
+import pathlib
+import platform
+
+IsWindows = platform.system() == 'Windows'
+
+def get_parser():
+	parser = argparse.ArgumentParser(
+		formatter_class=argparse.ArgumentDefaultsHelpFormatter
+	)
+
 	parser.add_argument(
-		"--seed",
+		"--world-size",
 		type=int,
-		default=42,
-		help="The seed for random generators intended for reproducibility",
+		default=1,
+		help="Number of GPUs for DDP training.",
 	)
+
 	parser.add_argument(
-		"--dataset_dir",
-		type=str,
-		help="Dataset directory",
+		"--master-port",
+		type=int,
+		default=12335,
+		help="Master port to use for DDP training.",
 	)
+
 	parser.add_argument(
-		"--exp_dir",
-		type=str,
-		help="Directory to store all train logs and files.",
+		"--tensorboard",
+		type=str2bool,
+		default=True,
+		help="Should various information be logged in tensorboard.",
 	)
+
 	parser.add_argument(
-		"--epochs",
+		"--num-epochs",
 		type=int,
 		default=1000,
-		help="Number of epochs to train",
+		help="Number of epochs to train.",
 	)
+
 	parser.add_argument(
-		"--pretrained_checkpoint",
-		type=str,
-		default=None,
-		help="pretrained checkpoint to initialize from",
-	)
-	parser.add_argument(
-		"--keep_epochs",
-		type=int,
-		default=10,
-		help="Number of epochs to keep. -1 means all epochs.",
-	)
-	parser.add_argument(
-		"--resume",
-		type=bool,
-		default=None,
-		help="Resume training. Will ignore --pretrained_checkpoint"
-	)
-	parser.add_argument(
-		"--save_every_n",
-		type=int,
-		default=10,
-		help="Save checkpoint after processing this number of epochs periodically.",
-	)
-	parser.add_argument(
-		"--use_fp16",
-		type=bool,
-		default=False,
-		help="Whether to use half precision training.",
-	)
-	parser.add_argument(
-		"--start_epoch",
+		"--start-epoch",
 		type=int,
 		default=1,
 		help="""Resume training from this epoch. It should be positive.
@@ -74,66 +83,390 @@ def parse_args(args):
 		exp-dir/epoch-{start_epoch-1}.pt
 		""",
 	)
-	BakerZhTtsDataModule.add_arguments(parser)
-	return parser.parse_args(args)
 
-def GetModel(args):
-	builder = utils.model.ModelBuilder()
+	parser.add_argument(
+		"--exp-dir",
+		type=Path,
+		default="matcha/exp",
+		help="""The experiment dir.
+		It specifies the directory where all training related
+		files, e.g., checkpoints, log, etc, are saved
+		""",
+	)
 
-	token_filename = os.path.join(args.dataset_dir, 'tokens.txt')
-	builder.LoadTokenizer(token_filename)
+	parser.add_argument(
+		"--tokens",
+		type=str,
+		default="data/tokens.txt",
+		help="""Path to vocabulary.""",
+	)
 
-	cmvn_filename = os.path.join(args.dataset_dir, 'cmvn.json')
-	builder.LoadCMVN(cmvn_filename)
+	parser.add_argument(
+		"--cmvn",
+		type=str,
+		default="data/fbank/cmvn.json",
+		help="""Path to vocabulary.""",
+	)
 
-	return builder.BuildModel()
+	parser.add_argument(
+		"--seed",
+		type=int,
+		default=42,
+		help="The seed for random generators intended for reproducibility",
+	)
+
+	parser.add_argument(
+		"--save-every-n",
+		type=int,
+		default=10,
+		help="""Save checkpoint after processing this number of epochs"
+		periodically. We save checkpoint to exp-dir/ whenever
+		params.cur_epoch % save_every_n == 0. The checkpoint filename
+		has the form: f'exp-dir/epoch-{params.cur_epoch}.pt'.
+		Since it will take around 1000 epochs, we suggest using a large
+		save_every_n to save disk space.
+		""",
+	)
+
+	parser.add_argument(
+		"--use-fp16",
+		type=str2bool,
+		default=False,
+		help="Whether to use half precision training.",
+	)
+
+	parser.add_argument(
+		"--keep-nepochs",
+		type=int,
+		default=10,
+		help="Keep the number of epochs checkpoints in disk."
+	)
+	parser.add_argument(
+		"--pretrained-checkpoint",
+		type=str,
+		default=None,
+		help="""Path to the checkpoint to initialize from.""",
+	)
+	parser.add_argument(
+		"--vocoder-checkpoint",
+		type=str,
+		default=None,
+		help="Log audio in validation set during training."
+	)
+	parser.add_argument(
+		"--learning-rate",
+		type=float,
+		default=2e-4,
+		help="Learning rate for Adam optimizer.",
+	)
+	parser.add_argument(
+		"--log-n-audio",
+		type=int,
+		default=3,
+		help="Log audio in validation set during training."
+	)
+
+	return parser
+
+
+def get_data_statistics():
+	return AttributeDict(
+		{
+			"mel_mean": 0,
+			"mel_std": 1,
+		}
+	)
+
+
+def _get_data_params() -> AttributeDict:
+	params = AttributeDict(
+		{
+			"name": "baker-zh",
+			"train_filelist_path": "./filelists/ljs_audio_text_train_filelist.txt",
+			"valid_filelist_path": "./filelists/ljs_audio_text_val_filelist.txt",
+			#  "batch_size": 64,
+			#  "num_workers": 1,
+			#  "pin_memory": False,
+			"cleaners": ["english_cleaners2"],
+			"add_blank": True,
+			"n_spks": 1,
+			"n_fft": 1024,
+			"n_feats": 80,
+			"sampling_rate": 22050,
+			"hop_length": 256,
+			"win_length": 1024,
+			"f_min": 0,
+			"f_max": 8000,
+			"seed": 1234,
+			"load_durations": False,
+			"data_statistics": get_data_statistics(),
+		}
+	)
+	return params
+
+
+def _get_model_params() -> AttributeDict:
+	n_feats = 80
+	filter_channels_dp = 256
+	encoder_params_p_dropout = 0.1
+	params = AttributeDict(
+		{
+			"n_spks": 1,  # for baker-zh.
+			"spk_emb_dim": 64,
+			"n_feats": n_feats,
+			"out_size": None,  # or use 172
+			"prior_loss": True,
+			"use_precomputed_durations": False,
+			"data_statistics": get_data_statistics(),
+			"encoder": AttributeDict(
+				{
+					"encoder_type": "RoPE Encoder",  # not used
+					"encoder_params": AttributeDict(
+						{
+							"n_feats": n_feats,
+							"n_channels": 192,
+							"filter_channels": 768,
+							"filter_channels_dp": filter_channels_dp,
+							"n_heads": 2,
+							"n_layers": 6,
+							"kernel_size": 3,
+							"p_dropout": encoder_params_p_dropout,
+							"spk_emb_dim": 64,
+							"n_spks": 1,
+							"prenet": True,
+						}
+					),
+					"duration_predictor_params": AttributeDict(
+						{
+							"filter_channels_dp": filter_channels_dp,
+							"kernel_size": 3,
+							"p_dropout": encoder_params_p_dropout,
+						}
+					),
+				}
+			),
+			"decoder": AttributeDict(
+				{
+					"channels": [256, 256],
+					"dropout": 0.05,
+					"attention_head_dim": 64,
+					"n_blocks": 1,
+					"num_mid_blocks": 2,
+					"num_heads": 2,
+					"act_fn": "snakebeta",
+				}
+			),
+			"cfm": AttributeDict(
+				{
+					"name": "CFM",
+					"solver": "euler",
+					"sigma_min": 1e-4,
+				}
+			),
+			"optimizer": AttributeDict(
+				{
+					"lr": 1e-4,
+					"weight_decay": 0.0,
+				}
+			),
+		}
+	)
+
+	return params
+
+
+def get_params():
+	params = AttributeDict(
+		{
+			"model_args": _get_model_params(),
+			"data_args": _get_data_params(),
+			"best_train_loss": float("inf"),
+			"best_valid_loss": float("inf"),
+			"best_train_epoch": -1,
+			"best_valid_epoch": -1,
+			"batch_idx_train": -1,  # 0
+			"log_interval": 10,
+			"valid_interval": 1500,
+			"env_info": get_env_info(),
+		}
+	)
+	return params
+
+
+def get_model(params):
+	m = MatchaTTS(**params.model_args)
+	return m
+
+
+def load_checkpoint_if_available(
+	params: AttributeDict, model: nn.Module
+) -> Optional[Dict[str, Any]]:
+	"""Load checkpoint from file.
+
+	If params.start_epoch is larger than 1, it will load the checkpoint from
+	`params.start_epoch - 1`.
+
+	Apart from loading state dict for `model` and `optimizer` it also updates
+	`best_train_epoch`, `best_train_loss`, `best_valid_epoch`,
+	and `best_valid_loss` in `params`.
+
+	Args:
+	  params:
+		The return value of :func:`get_params`.
+	  model:
+		The training model.
+	Returns:
+	  Return a dict containing previously saved training info.
+	"""
+	if params.start_epoch > 1:
+		filename = params.exp_dir / f"epoch-{params.start_epoch-1}.pt"
+	else:
+		return None
+
+	assert filename.is_file(), f"{filename} does not exist!"
+
+	saved_params = load_checkpoint(filename, model=model)
+
+	keys = [
+		"best_train_epoch",
+		"best_valid_epoch",
+		"batch_idx_train",
+		"best_train_loss",
+		"best_valid_loss",
+	]
+	for k in keys:
+		params[k] = saved_params[k]
+
+	return saved_params
+
 
 def prepare_input(batch: dict, tokenizer: Tokenizer, device: torch.device, params):
-    """Parse batch data"""
-    mel_mean = params.data_args.data_statistics.mel_mean
-    mel_std_inv = 1 / params.data_args.data_statistics.mel_std
-    for i in range(batch["features"].shape[0]):
-        n = batch["features_lens"][i]
-        batch["features"][i : i + 1, :n, :] = (
-            batch["features"][i : i + 1, :n, :] - mel_mean
-        ) * mel_std_inv
-        batch["features"][i : i + 1, n:, :] = 0
+	"""Parse batch data"""
+	mel_mean = params.data_args.data_statistics.mel_mean
+	mel_std_inv = 1 / params.data_args.data_statistics.mel_std
+	for i in range(batch["features"].shape[0]):
+		n = batch["features_lens"][i]
+		batch["features"][i : i + 1, :n, :] = (
+			batch["features"][i : i + 1, :n, :] - mel_mean
+		) * mel_std_inv
+		batch["features"][i : i + 1, n:, :] = 0
 
-    audio = batch["audio"].to(device)
-    features = batch["features"].to(device)
-    audio_lens = batch["audio_lens"].to(device)
-    features_lens = batch["features_lens"].to(device)
-    tokens = batch["tokens"]
+	audio = batch["audio"].to(device)
+	features = batch["features"].to(device)
+	audio_lens = batch["audio_lens"].to(device)
+	features_lens = batch["features_lens"].to(device)
+	tokens = batch["tokens"]
 
-    tokens = tokenizer.texts_to_token_ids(tokens, intersperse_blank=True)
-    tokens = k2.RaggedTensor(tokens)
-    row_splits = tokens.shape.row_splits(1)
-    tokens_lens = row_splits[1:] - row_splits[:-1]
-    tokens = tokens.to(device)
-    tokens_lens = tokens_lens.to(device)
-    # a tensor of shape (B, T)
-    tokens = tokens.pad(mode="constant", padding_value=tokenizer.pad_id)
+	tokens = tokenizer.texts_to_token_ids(tokens, intersperse_blank=True)
+	tokens = k2.RaggedTensor(tokens)
+	row_splits = tokens.shape.row_splits(1)
+	tokens_lens = row_splits[1:] - row_splits[:-1]
+	tokens = tokens.to(device)
+	tokens_lens = tokens_lens.to(device)
+	# a tensor of shape (B, T)
+	tokens = tokens.pad(mode="constant", padding_value=tokenizer.pad_id)
 
-    max_feature_length = fix_len_compatibility(features.shape[1])
-    if max_feature_length > features.shape[1]:
-        pad = max_feature_length - features.shape[1]
-        features = torch.nn.functional.pad(features, (0, 0, 0, pad))
+	max_feature_length = fix_len_compatibility(features.shape[1])
+	if max_feature_length > features.shape[1]:
+		pad = max_feature_length - features.shape[1]
+		features = torch.nn.functional.pad(features, (0, 0, 0, pad))
 
-        #  features_lens[features_lens.argmax()] += pad
+		#  features_lens[features_lens.argmax()] += pad
 
-    return audio, audio_lens, features, features_lens.long(), tokens, tokens_lens.long()
+	return audio, audio_lens, features, features_lens.long(), tokens, tokens_lens.long()
 
+
+def compute_validation_loss(
+	params: AttributeDict,
+	model: Union[nn.Module, DDP],
+	tokenizer: Tokenizer,
+	valid_dl: torch.utils.data.DataLoader,
+	world_size: int = 1,
+	rank: int = 0,
+) -> MetricsTracker:
+	"""Run the validation process."""
+	model.eval()
+	device = model.device if isinstance(model, DDP) else next(model.parameters()).device
+	get_losses = model.module.get_losses if isinstance(model, DDP) else model.get_losses
+
+	# used to summary the stats over iterations
+	tot_loss = MetricsTracker()
+
+	with torch.no_grad():
+		for batch_idx, batch in enumerate(valid_dl):
+			(
+				audio,
+				audio_lens,
+				features,
+				features_lens,
+				tokens,
+				tokens_lens,
+			) = prepare_input(batch, tokenizer, device, params)
+
+			losses = get_losses(
+				{
+					"x": tokens,
+					"x_lengths": tokens_lens,
+					"y": features.permute(0, 2, 1),
+					"y_lengths": features_lens,
+					"spks": None,  # should change it for multi-speakers
+					"durations": None,
+				}
+			)
+
+			batch_size = len(batch["tokens"])
+
+			loss_info = MetricsTracker()
+			loss_info["samples"] = batch_size
+
+			s = 0
+
+			for key, value in losses.items():
+				v = value.detach().item()
+				loss_info[key] = v * batch_size
+				s += v * batch_size
+
+			loss_info["tot_loss"] = s
+
+			# summary stats
+			tot_loss = tot_loss + loss_info
+
+	if world_size > 1:
+		tot_loss.reduce(device)
+
+	loss_value = tot_loss["tot_loss"] / tot_loss["samples"]
+	if loss_value < params.best_valid_loss:
+		params.best_valid_epoch = params.cur_epoch
+		params.best_valid_loss = loss_value
+
+	return tot_loss
+
+@torch.inference_mode()
+def infer_one_batch(
+	writer: SummaryWriter,
+	params: AttributeDict,
+	valid_text: typing.List[str],
+	model_wrapper: ModelWrapper,
+	vocoder: Union[MelDecoder, None]
+):
+	for idx, text in enumerate(valid_text):
+		output = model_wrapper(text)
+		waveform = vocoder(output["mel"].cpu()) # vocoder has problems running on gpu
+		writer.add_audio(f"valid/audio{idx}", waveform, params.batch_idx_train, sample_rate=params.data_args.sampling_rate)
 
 def train_one_epoch(
-	args,
-	model: utils.model.Model,
-	optimizer: torch.optim.Optimizer,
+	params: AttributeDict,
+	model: Union[nn.Module, DDP],
+	tokenizer: Tokenizer,
+	optimizer: Optimizer,
 	train_dl: torch.utils.data.DataLoader,
 	valid_dl: torch.utils.data.DataLoader,
 	scaler: GradScaler,
-	tb_writer: typing.Union[SummaryWriter, None] = None,
+	tb_writer: Optional[SummaryWriter] = None,
 	world_size: int = 1,
 	rank: int = 0,
+	vocoder: Union[MelDecoder, None] = None,
+	valid_text: Union[typing.List[str], None] = None,
 ) -> None:
 	"""Train the model for one epoch.
 
@@ -168,16 +501,16 @@ def train_one_epoch(
 
 	def save_bad_model(suffix: str = ""):
 		save_checkpoint(
-			filename=os.path.join(args.exp_dir, f"bad-model{suffix}-{rank}.pt"),
+			filename=params.exp_dir / f"bad-model{suffix}-{rank}.pt",
 			model=model,
-			params=model.GetParams(),
+			params=params,
 			optimizer=optimizer,
 			scaler=scaler,
 			rank=0,
 		)
 
 	for batch_idx, batch in enumerate(train_dl):
-		model.GetParams().batch_idx_train += 1
+		params.batch_idx_train += 1
 		# audio: (N, T), float32
 		# features: (N, T, C), float32
 		# audio_lens, (N,), int32
@@ -295,6 +628,17 @@ def train_one_epoch(
 					tb_writer, "train/valid_", params.batch_idx_train
 				)
 
+				if vocoder is not None:
+					model_wrapper = ModelWrapper(tokenizer, model, None)
+					model_wrapper.device = device
+					infer_one_batch(
+						writer=tb_writer,
+						params=params,
+						valid_text=valid_text,
+						model_wrapper = model_wrapper, 
+						vocoder=vocoder
+					)
+
 	loss_value = tot_loss["tot_loss"] / tot_loss["samples"]
 	params.train_loss = loss_value
 	if params.train_loss < params.best_train_loss:
@@ -302,91 +646,179 @@ def train_one_epoch(
 		params.best_train_loss = params.train_loss
 
 
+def run(rank, world_size, args):
+	params = get_params()
+	params.update(vars(args))
 
-def main(args):
+	fix_random_seed(params.seed)
+	if world_size > 1:
+		setup_dist(rank, world_size, params.master_port)
+
+	setup_logger(f"{params.exp_dir}/log/log-train")
 	logging.info("Training started")
-	rank = 1
-	world_size = 1
 
-	# Setup tensorboard logger
-	tensorboard_logdir = os.path.join(args.exp_dir, "tensorboard")
-	writer = SummaryWriter(log_dir=tensorboard_logdir)
+	if args.tensorboard and rank == 0:
+		tb_writer = SummaryWriter(log_dir=f"{params.exp_dir}/tensorboard")
+	else:
+		tb_writer = None
+
+	device = torch.device("cpu")
+	if torch.cuda.is_available():
+		device = torch.device("cuda", rank)
+	logging.info(f"Device: {device}")
+
+	tokenizer = Tokenizer(params.tokens)
+	params.pad_id = tokenizer.pad_id
+	params.vocab_size = tokenizer.vocab_size
+	params.model_args.n_vocab = params.vocab_size
+
+	with open(params.cmvn) as f:
+		stats = json.load(f)
+		params.data_args.data_statistics.mel_mean = stats["fbank_mean"]
+		params.data_args.data_statistics.mel_std = stats["fbank_std"]
+
+		params.model_args.data_statistics.mel_mean = stats["fbank_mean"]
+		params.model_args.data_statistics.mel_std = stats["fbank_std"]
+
+		params.data_args.sampling_rate = stats["sampling_rate"]
+	params.model_args.optimizer.lr = args.learning_rate
+
+	logging.info(params)
+	print(params)
 
 	logging.info("About to create model")
-	model = GetModel(args)
+	model = get_model(params)
 
-	num_param = sum([p.numel() for p in model.GetModel().parameters()])
+	num_param = sum([p.numel() for p in model.parameters()])
 	logging.info(f"Number of parameters: {num_param}")
 
-	if args.pretrained_checkpoint is not None:
-		checkpoint = model.LoadCheckpoint(args.pretrained_checkpoint)
-	model.UploadToDevice(device)
+	assert params.start_epoch > 0, params.start_epoch
 
-	optimizer = torch.optim.Adam(model.parameters(), **model.optimizer)
+	# Ref: https://stackoverflow.com/questions/57286486/i-cant-load-my-model-because-i-cant-put-a-posixpath
+	if IsWindows:
+		temp = pathlib.PosixPath
+		pathlib.PosixPath = pathlib.WindowsPath
+
+	if args.pretrained_checkpoint is not None:
+		logging.info(f"Loading pretrained checkpoint {args.pretrained_checkpoint}")
+		checkpoints = load_checkpoint(args.pretrained_checkpoint, model=model)
+	else:
+		checkpoints = load_checkpoint_if_available(params=params, model=model)
+	
+	if IsWindows:
+		pathlib.PosixPath = temp
+
+	model.to(device)
+
+	melDecoder: Union[MelDecoder, None] = None
+	if args.vocoder_checkpoint is not None:
+		melDecoder = MelDecoder(args.vocoder_checkpoint)
+
+	if world_size > 1:
+		logging.info("Using DDP")
+		model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+
+	optimizer = torch.optim.Adam(model.parameters(), **params.model_args.optimizer)
 
 	logging.info("About to create datamodule")
+
 	baker_zh = BakerZhTtsDataModule(args)
+
 	train_cuts = baker_zh.train_cuts()
 	train_dl = baker_zh.train_dataloaders(train_cuts)
+
 	valid_cuts = baker_zh.valid_cuts()
 	valid_dl = baker_zh.valid_dataloaders(valid_cuts)
 
-	scaler = GradScaler(enabled=args.use_fp16, init_scale=1.0)
-	if args.pretrained_checkpoint is not None and "grad_scaler" in checkpoint:
-		logging.info("Loading grad scaler state dict")
-		scaler.load_state_dict(checkpoint["grad_scaler"])
+	valid_text_batch = [ x["text"] for x in itertools.islice(iter(valid_dl), args.log_n_audio) ]
+	valid_text: typing.List[str] = []
+	for i in valid_text_batch:
+		for j in i:
+			valid_text.append(j)
+			if len(valid_text) >= args.log_n_audio:
+				break
+	if tb_writer is not None:
+		for i, text in enumerate(valid_text):
+			tb_writer.add_text(f"valid/text{i}", text)
 
-	for epoch in range(args.start_epoch, args.epochs + 1):
+	scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
+	if checkpoints and "grad_scaler" in checkpoints:
+		logging.info("Loading grad scaler state dict")
+		scaler.load_state_dict(checkpoints["grad_scaler"])
+
+	for epoch in range(params.start_epoch, params.num_epochs + 1):
 		logging.info(f"Start epoch {epoch}")
-		fix_random_seed(args.seed + epoch - 1)
+		fix_random_seed(params.seed + epoch - 1)
 		if getattr(train_dl, "sampler") is not None:
 			train_dl.sampler.set_epoch(epoch - 1)
 
-		model.GetParams().cur_epoch = epoch
-		
+		params.cur_epoch = epoch
+
+		if tb_writer is not None:
+			tb_writer.add_scalar("train/epoch", epoch, params.batch_idx_train)
+
 		train_one_epoch(
-			args=args,
+			params=params,
 			model=model,
+			tokenizer=tokenizer,
 			optimizer=optimizer,
 			train_dl=train_dl,
 			valid_dl=valid_dl,
 			scaler=scaler,
-			tb_writer=writer,
+			tb_writer=tb_writer,
 			world_size=world_size,
 			rank=rank,
+			vocoder=melDecoder,
+			valid_text=valid_text,
 		)
 
-		if epoch % args.save_every_n == 0 or epoch == args.epochs:
-			filename = os.path.join(args.output_dir, f"epoch_{epoch}.pt")
+		if epoch % params.save_every_n == 0 or epoch == params.num_epochs:
+			filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
 			save_checkpoint(
 				filename=filename,
-				params=model.Serialize(),
+				params=params,
 				model=model,
 				optimizer=optimizer,
 				scaler=scaler,
 				rank=rank,
 			)
-			if args.keep_epochs != -1:
-				model_list = [ x for x in os.listdir(args.output_dir) if x.startswith("epoch_") and x.endswith(".pt") ]
-				model_list = sorted(model_list, key=lambda x: int(x[len('epoch_'):-3]))
-				if len(model_list) > args.keep_epochs:
-					for i in range(0, len(model_list) - args.keep_epochs):
-						os.remove(os.path.join(args.output_dir, model_list[i]))
-
+			if args.keep_nepochs != -1:
+				model_list = [ x for x in os.listdir(str(params.exp_dir)) if x.startswith("epoch-") and x.endswith(".pt") ]
+				model_list = sorted(model_list, key=lambda x: int(x[len('epoch-'):-3]))
+				if len(model_list) > args.keep_nepochs:
+					for i in range(0, len(model_list) - args.keep_nepochs):
+						os.remove(params.exp_dir / model_list[i])
+			
 			if rank == 0:
-				if model.GetParams().best_train_epoch == model.GetParams().cur_epoch:
-					best_train_filename = os.path.join(args.dataset_dir, "best-train-loss.pt")
-					shutil.copyfile(src=filename, dst=best_train_filename)
+				if params.best_train_epoch == params.cur_epoch:
+					best_train_filename = params.exp_dir / "best-train-loss.pt"
+					copyfile(src=filename, dst=best_train_filename)
 
-				if model.GetParams().best_valid_epoch == model.GetParams().cur_epoch:
-					best_valid_filename = os.path.join(args.dataset_dir, "best-valid-loss.pt")
-					shutil.copyfile(src=filename, dst=best_valid_filename)
+				if params.best_valid_epoch == params.cur_epoch:
+					best_valid_filename = params.exp_dir / "best-valid-loss.pt"
+					copyfile(src=filename, dst=best_valid_filename)
 
 	logging.info("Done!")
 
-if __name__ == '__main__':
+	if world_size > 1:
+		torch.distributed.barrier()
+		cleanup_dist()
+
+
+def main():
+	parser = get_parser()
+	BakerZhTtsDataModule.add_arguments(parser)
+	args = parser.parse_args()
+
+	world_size = args.world_size
+	assert world_size >= 1
+	if world_size > 1:
+		mp.spawn(run, args=(world_size, args), nprocs=world_size, join=True)
+	else:
+		run(rank=0, world_size=1, args=args)
+
+
+if __name__ == "__main__":
 	torch.set_num_threads(1)
 	torch.set_num_interop_threads(1)
-	args = parse_args()
-	fix_random_seed(args.seed)
-	main(args)
+	main()

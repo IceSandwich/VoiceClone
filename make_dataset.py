@@ -54,6 +54,7 @@ def main(args: argparse.Namespace):
 	for cut in cut_set:
 		tokens = convert_text_to_token(cut.supervisions[0].text)
 		cut.tokens = tokens
+		cut.supervisions[0].normalized_text = cut.supervisions[0].text
 
 	if args.validset_ratio is None:
 		dataset_filename = os.path.join(args.output_dir, f"{args.dataset_name}_train.jsonl.gz")

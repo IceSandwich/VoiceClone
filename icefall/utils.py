@@ -32,7 +32,7 @@ import argparse
 import json
 import pathlib
 import os
-import datetime
+from datetime import datetime
 
 
 def str2bool(v):

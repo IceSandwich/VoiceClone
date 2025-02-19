@@ -1,5 +1,4 @@
 import argparse, torch, os
-from icefall.tts_datamodule import BakerZhTtsDataModule
 import utils
 import utils.model
 import soundfile as sf
@@ -40,14 +39,7 @@ def parse_args(args = None):
 		required=True,
 		help="The output audio file.",
 	)
-	parser.add_argument(
-        "--sampling_rate",
-        type=int,
-        default=22050,
-        help="The sampling rate of the generated speech (default: 22050 for baker_zh)",
-    )
 
-	BakerZhTtsDataModule.add_arguments(parser)
 	return parser.parse_args(args)
 
 @torch.inference_mode()
@@ -60,6 +52,8 @@ def main(args):
 
 	cmvn_filename = os.path.join(args.dataset_dir, 'cmvn.json')
 	builder.LoadCMVN(cmvn_filename)
+	sampling_rate = builder.GetSamplingRate()
+	print(f"Using sampling rate: {sampling_rate}")
 
 	model = builder.BuildModel()
 	model.LoadCheckpoint(args.model)
@@ -72,7 +66,7 @@ def main(args):
 	sf.write(
 		file=args.output,
 		data=waveform,
-		samplerate=args.sampling_rate,
+		samplerate=sampling_rate,
 		subtype="PCM_16",
 	)
 	print("Done.")

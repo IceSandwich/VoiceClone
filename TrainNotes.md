@@ -176,7 +176,7 @@ python -m pip install git+https://github.com/lhotse-speech/lhotse
     import k2
 ModuleNotFoundError: No module named 'k2'
 ```
-不要在https://k2-fsa.github.io/k2/installation/pre-compiled-cpu-wheels-windows/2.3.1.html安装。
+不要在[这里](https://k2-fsa.github.io/k2/installation/pre-compiled-cpu-wheels-windows/2.3.1.html)安装。
 要CUDA版本的要自己编译。
 
 6. 依赖问题
@@ -205,4 +205,14 @@ python -m pip install -e .
 
 ``` bash
 python make_dataset.py  --wav_folder "D:\MyGithub\CloneVoice\tvboy_denoised_mandarin_seed34751218\dataset" --label_text "D:\MyGithub\CloneVoice\assets\mandarin.txt" --output_dir "D:\MyGithub\CloneVoice\tvboy_denoised_mandarin_seed34751218\inputs" --language "mandarin" --speaker "tvboy_denoised" --gender "boy" --split_validset 0.05 
+```
+
+# 训练
+
+``` bash
+python make_dataset.py --wav_folder "D:\MyGithub\VoiceClone\assets\dataset\tvboy_denoised_mandarin_seed34751218" --label_text "D:\MyGithub\VoiceClone\assets\text\mandarin.txt" --output_dir "D:\MyGithub\VoiceClone\assets\train\tvboy_denoised_mandarin_seed34751218\inputs" --language "mandarin" --speaker "tvboy_denoised" --gender "boy" --validset_ratio 0.05
+
+python infer.py --model "D:\MyGithub\VoiceClone\assets\checkpoint\tvboy_denoised_mandarin_seed34751218\epoch-1000.pt" --dataset_dir "D:\MyGithub\VoiceClone\assets\train\tvboy_denoised_mandarin_seed34751218\inputs" --vocoder "D:\MyGithub\VoiceClone\assets\model\vocoder\generator_v2" --text "你好呀，有什么需要我帮忙的吗？" --output output.wav
+
+python train.py --exp-dir "D:\MyGithub\VoiceClone\assets\train\tvboy_denoised_mandarin_seed34751218" --num-epochs 3 --num-workers 4 --manifest-dir "D:\MyGithub\VoiceClone\assets\train\tvboy_denoised_mandarin_seed34751218\inputs" --tokens "D:\MyGithub\VoiceClone\assets\train\tvboy_denoised_mandarin_seed34751218\inputs\tokens.txt" --cmvn "D:\MyGithub\VoiceClone\assets\train\tvboy_denoised_mandarin_seed34751218\inputs\cmvn.json" --num-buckets 20 --drop-last 0 --vocoder-checkpoint "D:\MyGithub\VoiceClone\assets\model\vocoder\generator_v2" --pretrained-checkpoint "D:\GITHUB\icefall-tts-baker-matcha-zh-2024-12-27\epoch-2000.pt"
 ```

@@ -12,14 +12,31 @@ from icefall.tokenizer import Tokenizer
 import sys, pathlib
 from icefall.models.matcha_tts import MatchaTTS
 
+import platform
+IsWindows = platform.system() == 'Windows'
+
+
 class Model:
-	def __init__(self, tokenizer: Tokenizer, model: MatchaTTS, n_timesteps: int = 2, length_scale: float = 1.0, temperature: float = 0.667) -> None:
+	def __init__(self, tokenizer: Tokenizer, model: MatchaTTS, confs, n_timesteps: int = 2, length_scale: float = 1.0, temperature: float = 0.667) -> None:
 		self.tokenizer = tokenizer
 		self.model = model
 		self.n_timesteps = n_timesteps
 		self.length_scale = length_scale
 		self.temperature = temperature
 		self.device = 'cpu'
+		self.params = AttributeDict({
+            "model_args": confs,
+            "best_train_loss": float("inf"),
+            "best_valid_loss": float("inf"),
+            "best_train_epoch": -1,
+            "best_valid_epoch": -1,
+            "batch_idx_train": -1,  # 0
+            "log_interval": 10,
+            "valid_interval": 1500,
+        })
+
+	def GetParams(self):
+		return self.params
 
 	def GetModel(self) -> MatchaTTS:
 		return self.model
@@ -30,8 +47,9 @@ class Model:
 	
 	def LoadCheckpoint(self, filename: str):
 		# Ref: https://stackoverflow.com/questions/57286486/i-cant-load-my-model-because-i-cant-put-a-posixpath
-		temp = pathlib.PosixPath
-		pathlib.PosixPath = pathlib.WindowsPath
+		if IsWindows:
+			temp = pathlib.PosixPath
+			pathlib.PosixPath = pathlib.WindowsPath
 
 		logging.info(f"Loading checkpoint from {filename}")
 		checkpoint = torch.load(filename, map_location="cpu")
@@ -49,7 +67,11 @@ class Model:
 		else:
 			self.model.load_state_dict(checkpoint["model"], strict=strict)
 
-		pathlib.PosixPath = temp
+		checkpoint.pop("model")
+
+		if IsWindows:
+			pathlib.PosixPath = temp
+		return checkpoint
 
 	def __call__(self, text: str):
 		text_processed = tokens.process_text(text=text, tokenizer=self.tokenizer, device=self.device)
@@ -82,8 +104,14 @@ class ModelBuilder:
 
 	def LoadCMVN(self, cmvn_filename: str):
 		cmvn = ReadCMVN(cmvn_filename)
-		self.mel_mean, self.mel_std = cmvn["mel_mean"], cmvn["mel_std"]
+		self.mel_mean, self.mel_std = cmvn["fbank_mean"], cmvn["fbank_std"]
 		self.sampling_rate = cmvn["sampling_rate"]
+
+	def GetSamplingRate(self):
+		"""
+		call LoadCMVN() first
+		"""
+		return self.sampling_rate
 
 	def BuildModel(self):
 		params = AttributeDict({
@@ -141,7 +169,8 @@ class ModelBuilder:
 
 		model = Model(
 			self.tokenizer,
-			MatchaTTS(**params)
+			MatchaTTS(**params),
+			params
 		)
 		return model
 	
