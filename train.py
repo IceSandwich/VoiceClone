@@ -735,6 +735,7 @@ def run(rank, world_size, args):
 	valid_text_batch = [ x["text"] for x in itertools.islice(iter(valid_dl), args.log_n_audio) ]
 	valid_text: typing.List[dict] = []
 	model_wrapper = ModelWrapper(tokenizer, model, None)
+	model_wrapper.device = device
 	for i in valid_text_batch:
 		for j in i:
 			valid_text.append(model_wrapper.Encode(j))
