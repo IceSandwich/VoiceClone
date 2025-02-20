@@ -11,6 +11,7 @@ from pathlib import Path
 from shutil import copyfile
 from typing import Any, Dict, Optional, Union
 import itertools
+import heapq
 
 # import before everything
 import piper_phonemize
@@ -138,7 +139,19 @@ def get_parser():
 	parser.add_argument(
 		"--keep-nepochs",
 		type=int,
-		default=10,
+		default=2,
+		help="Keep the number of epochs checkpoints in disk."
+	)
+	parser.add_argument(
+		"--keep-nbest-train",
+		type=int,
+		default=5,
+		help="Keep the number of epochs checkpoints in disk."
+	)
+	parser.add_argument(
+		"--keep-nbest-valid",
+		type=int,
+		default=5,
 		help="Keep the number of epochs checkpoints in disk."
 	)
 	parser.add_argument(
@@ -383,14 +396,16 @@ def compute_validation_loss(
 	valid_dl: torch.utils.data.DataLoader,
 	world_size: int = 1,
 	rank: int = 0,
-) -> MetricsTracker:
-	"""Run the validation process."""
+) -> typing.Tuple[MetricsTracker, torch.Tensor]:
+	"""Run the validation process with mel output."""
 	model.eval()
 	device = model.device if isinstance(model, DDP) else next(model.parameters()).device
+	get_losses_with_output = model.module.get_losses_with_output if isinstance(model, DDP) else model.get_losses_with_output
 	get_losses = model.module.get_losses if isinstance(model, DDP) else model.get_losses
 
 	# used to summary the stats over iterations
 	tot_loss = MetricsTracker()
+	ret_mel = None
 
 	with torch.no_grad():
 		for batch_idx, batch in enumerate(valid_dl):
@@ -403,16 +418,20 @@ def compute_validation_loss(
 				tokens_lens,
 			) = prepare_input(batch, tokenizer, device, params)
 
-			losses = get_losses(
-				{
-					"x": tokens,
-					"x_lengths": tokens_lens,
-					"y": features.permute(0, 2, 1),
-					"y_lengths": features_lens,
-					"spks": None,  # should change it for multi-speakers
-					"durations": None,
-				}
-			)
+			inputs = {
+				"x": tokens,
+				"x_lengths": tokens_lens,
+				"y": features.permute(0, 2, 1),
+				"y_lengths": features_lens,
+				"spks": None,  # should change it for multi-speakers
+				"durations": None,
+			}
+			if batch_idx == 0:
+				losses:typing.Dict[str, typing.Any] = get_losses_with_output(inputs)
+				ret_mel = losses['mel']
+				losses.pop('mel')
+			else:
+				losses = get_losses(inputs)
 
 			batch_size = len(batch["tokens"])
 
@@ -439,21 +458,75 @@ def compute_validation_loss(
 		params.best_valid_epoch = params.cur_epoch
 		params.best_valid_loss = loss_value
 
-	return tot_loss
+	return tot_loss, ret_mel
 
 @torch.inference_mode()
 def infer_one_batch(
 	writer: SummaryWriter,
 	params: AttributeDict,
 	valid_text: typing.List[dict],
-	model_wrapper: ModelWrapper,
+	mel: torch.Tensor, # [2, 80, 860]
 	vocoder: Union[MelDecoder, None]
 ):
 	logging.info("Start infer one batch...")
-	for idx, text in enumerate(valid_text):
-		output = model_wrapper.Forward(text) # text is { "x": [xxx], "x_length": [xxx], "text": "xxx"}
-		waveform = vocoder(output["mel"]) # vocoder has problems running on gpu
-		writer.add_audio(f"valid/audio{idx}", waveform.detach().cpu(), params.batch_idx_train, sample_rate=params.data_args.sampling_rate)
+	used_mel = mel[:len(valid_text)]
+	for idx, mel in enumerate(used_mel):
+		waveform = vocoder(mel).detach().cpu()
+		writer.add_audio(f"valid/audio{idx}", waveform, params.batch_idx_train, sample_rate=params.data_args.sampling_rate)
+
+class KeepBestNCheckpoints:
+	def __init__(self, save_dir: str, n: int = 5):
+		self.n = n
+		self.save_dir = save_dir
+		self.checkpoints: typing.List[typing.Tuple[float, str]] = []
+		
+		if not os.path.exists(save_dir):
+			os.makedirs(save_dir)
+
+	def Run(self, epoch: int, metric_value: float, model_filename: str):
+		"""
+		must run in rank0
+		"""
+		checkpoint_name = f"epoch-{epoch}-{metric_value:.4f}.pt"
+		checkpoint_path = os.path.join(self.save_dir, checkpoint_name)
+
+		heapq.heappush(self.checkpoints, (-metric_value, checkpoint_path))
+		copyfile(src=model_filename, dst=checkpoint_path)
+		
+		if len(self.checkpoints) > self.n:
+			_, worst_checkpoint = heapq.heappop(self.checkpoints)
+			os.remove(worst_checkpoint)  # Remove the worst checkpoint
+
+class KeepLastNCheckpoints:
+	def __init__(self, save_dir: str, n: int = 5):
+		self.save_dir = save_dir
+		self.n = n
+		self.checkpoints: typing.List[str] = []
+		if not os.path.exists(save_dir):
+			os.makedirs(save_dir)
+
+	def Run(self, params, model, optimizer, scaler):
+		"""
+		must run in rank0
+		"""
+		checkpoint_filename = f"epoch-{params.cur_epoch}.pt"
+		checkpoint_path = os.path.join(self.save_dir, checkpoint_filename)
+
+		save_checkpoint(
+			filename=checkpoint_path,
+			params=params,
+			model=model,
+			optimizer=optimizer,
+			scaler=scaler,
+			rank=0
+		)
+		self.checkpoints.append(checkpoint_path)
+
+		if len(self.checkpoints) > self.n:
+			worst_checkpoint = self.checkpoints.pop(0)
+			os.remove(worst_checkpoint)   # Remove the worst checkpoint
+
+		return checkpoint_filename
 
 def train_one_epoch(
 	params: AttributeDict,
@@ -610,7 +683,7 @@ def train_one_epoch(
 
 		if params.batch_idx_train % params.valid_interval == 1:
 			logging.info("Computing validation loss")
-			valid_info = compute_validation_loss(
+			valid_info, mel = compute_validation_loss( # mel = (tensor([[[2, 80, 860]]]), )
 				params=params,
 				model=model,
 				tokenizer=tokenizer,
@@ -635,7 +708,7 @@ def train_one_epoch(
 						writer=tb_writer,
 						params=params,
 						valid_text=valid_text,
-						model_wrapper = model_wrapper, 
+						mel=mel[0],
 						vocoder=vocoder
 					)
 					del model_wrapper
@@ -668,6 +741,14 @@ def run(rank, world_size, args):
 	if not IsWindows and torch.cuda.is_available(): # my windows cannot install cuda k2 library
 		device = torch.device("cuda", rank)
 	logging.info(f"Device: {device}")
+
+	if rank == 0:
+		saving_best_train = KeepBestNCheckpoints(str(params.exp_dir / "best-train"), args.keep_nbest_train)
+		saving_best_valid = KeepBestNCheckpoints(str(params.exp_dir / "best-valid"), args.keep_nbest_valid)
+		saving_last_epoch = KeepLastNCheckpoints(str(params.exp_dir / "last-epoch"), args.keep_nepochs)
+		logging.info(f"Best train checkpoints will save to {saving_best_train.save_dir}")
+		logging.info(f"Best validation checkpoints will save to {saving_best_valid.save_dir}")
+		logging.info(f"Last epoch checkpoints will save to {saving_last_epoch.save_dir}")
 
 	tokenizer = Tokenizer(params.tokens)
 	params.pad_id = tokenizer.pad_id
@@ -777,31 +858,14 @@ def run(rank, world_size, args):
 			valid_text=valid_text,
 		)
 
-		if epoch % params.save_every_n == 0 or epoch == params.num_epochs:
-			filename = params.exp_dir / f"epoch-{params.cur_epoch}.pt"
-			save_checkpoint(
-				filename=filename,
-				params=params,
-				model=model,
-				optimizer=optimizer,
-				scaler=scaler,
-				rank=rank,
-			)
-			if  rank == 0 and args.keep_nepochs != -1:
-				model_list = [ x for x in os.listdir(str(params.exp_dir)) if x.startswith("epoch-") and x.endswith(".pt") ]
-				model_list = sorted(model_list, key=lambda x: int(x[len('epoch-'):-3]))
-				if len(model_list) > args.keep_nepochs:
-					for i in range(0, len(model_list) - args.keep_nepochs):
-						os.remove(params.exp_dir / model_list[i])
-			
-			if rank == 0:
-				if params.best_train_epoch == params.cur_epoch:
-					best_train_filename = params.exp_dir / "best-train-loss.pt"
-					copyfile(src=filename, dst=best_train_filename)
+		if rank == 0 and (epoch % params.save_every_n == 0 or epoch == params.num_epochs):
+			filename = saving_last_epoch.Run(params, model, optimizer, scaler)
 
-				if params.best_valid_epoch == params.cur_epoch:
-					best_valid_filename = params.exp_dir / "best-valid-loss.pt"
-					copyfile(src=filename, dst=best_valid_filename)
+			if params.best_train_epoch == params.cur_epoch:
+				saving_best_train.Run(params.cur_epoch, params.best_train_loss, filename)
+
+			if params.best_valid_epoch == params.cur_epoch:
+				saving_best_valid.Run(params.cur_epoch, params.best_valid_loss, filename)
 
 	logging.info("Done!")
 

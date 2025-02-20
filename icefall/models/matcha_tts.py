@@ -151,7 +151,7 @@ class MatchaTTS(torch.nn.Module):  # 🍵
             "rtf": rtf,
         }
 
-    def forward(
+    def forward_with_output(
         self,
         x,
         x_lengths,
@@ -260,7 +260,7 @@ class MatchaTTS(torch.nn.Module):  # 🍵
         mu_y = mu_y.transpose(1, 2)
 
         # Compute loss of the decoder
-        diff_loss, _ = self.decoder.compute_loss(
+        diff_loss, output = self.decoder.compute_loss(
             x1=y, mask=y_mask, mu=mu_y, spks=spks, cond=cond
         )
 
@@ -272,7 +272,45 @@ class MatchaTTS(torch.nn.Module):  # 🍵
         else:
             prior_loss = 0
 
+        return dur_loss, prior_loss, diff_loss, attn, output
+    
+    def forward(
+        self,
+        x,
+        x_lengths,
+        y,
+        y_lengths,
+        spks=None,
+        out_size=None,
+        cond=None,
+        durations=None,
+    ):
+        dur_loss, prior_loss, diff_loss, attn, _ = self.forward_with_output(
+            x, x_lengths, y, y_lengths, spks, out_size, cond, durations
+        )
         return dur_loss, prior_loss, diff_loss, attn
+    
+    def get_losses_with_output(self, batch):
+        x, x_lengths = batch["x"], batch["x_lengths"]
+        y, y_lengths = batch["y"], batch["y_lengths"]
+        spks = batch["spks"]
+
+        dur_loss, prior_loss, diff_loss, _, output = self.forward_with_output(
+            x=x,
+            x_lengths=x_lengths,
+            y=y,
+            y_lengths=y_lengths,
+            spks=spks,
+            out_size=self.out_size,
+            durations=batch["durations"],
+        )
+        mel = denormalize(output, self.mel_mean, self.mel_std),
+        return {
+            "dur_loss": dur_loss,
+            "prior_loss": prior_loss,
+            "diff_loss": diff_loss,
+            "mel": mel,
+        }
 
     def get_losses(self, batch):
         x, x_lengths = batch["x"], batch["x_lengths"]
