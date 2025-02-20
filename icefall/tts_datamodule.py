@@ -153,6 +153,22 @@ class BakerZhTtsDataModule:
             default="PrecomputedFeatures",
             help="AudioSamples or PrecomputedFeatures",
         )
+        
+        group.add_argument(
+            "--dataset_train_file",
+            type=str,
+            default="baker_zh_cuts_train.jsonl.gz"
+        )
+        group.add_argument(
+            "--dataset_valid_file",
+            type=str,
+            default="baker_zh_cuts_valid.jsonl.gz"
+        )
+        group.add_argument(
+            "--dataset_test_file",
+            type=str,
+            default="baker_zh_cuts_test.jsonl.gz"
+        )
 
     def train_dataloaders(
         self,
@@ -322,19 +338,19 @@ class BakerZhTtsDataModule:
     def train_cuts(self) -> CutSet:
         logging.info("About to get train cuts")
         return load_manifest_lazy(
-            self.args.manifest_dir / "baker_zh_cuts_train.jsonl.gz"
+            self.args.manifest_dir / self.args.dataset_train_file
         )
 
     @lru_cache()
     def valid_cuts(self) -> CutSet:
         logging.info("About to get validation cuts")
         return load_manifest_lazy(
-            self.args.manifest_dir / "baker_zh_cuts_valid.jsonl.gz"
+            self.args.manifest_dir / self.args.dataset_valid_file
         )
 
     @lru_cache()
     def test_cuts(self) -> CutSet:
         logging.info("About to get test cuts")
         return load_manifest_lazy(
-            self.args.manifest_dir / "baker_zh_cuts_test.jsonl.gz"
+            self.args.manifest_dir / self.args.dataset_test_file
         )
