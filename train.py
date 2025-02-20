@@ -169,7 +169,7 @@ def get_parser():
 	parser.add_argument(
 		"--learning-rate",
 		type=float,
-		default=5e-4,
+		default=2e-4,
 		help="Learning rate for Adam optimizer.",
 	)
 	parser.add_argument(
@@ -196,6 +196,12 @@ def get_parser():
 		type=int,
 		default=base_mult,
 		help="multiply t0 to get next t"
+	)
+	parser.add_argument(
+		"--scheduler_eta_min",
+		type=float,
+		default=1e-5,
+		help="min of scheduler"
 	)
 
 	return parser
@@ -830,7 +836,8 @@ def run(rank, world_size, args):
 	scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
 		optimizer,
 		T_0=args.scheduler_cos_T0,
-		T_mult=args.scheduler_cos_mult
+		T_mult=args.scheduler_cos_mult,
+		eta_min=args.scheduler_eta_min
 	)
 	# TODO: load scheduler from checkpoint
 
