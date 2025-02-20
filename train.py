@@ -179,7 +179,7 @@ def get_parser():
 		help="Log audio in validation set during training."
 	)
 	total_steps = 1000 * 20
-	base_mult = 1.5
+	base_mult = 2
 	peak = 3
 	mult = 1
 	last_acc_multi = base_mult
@@ -193,7 +193,7 @@ def get_parser():
 	)
 	parser.add_argument(
 		"--scheduler_cos_mult",
-		type=float,
+		type=int,
 		default=base_mult,
 		help="multiply t0 to get next t"
 	)
