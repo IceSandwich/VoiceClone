@@ -526,7 +526,7 @@ class KeepLastNCheckpoints:
 			worst_checkpoint = self.checkpoints.pop(0)
 			os.remove(worst_checkpoint)   # Remove the worst checkpoint
 
-		return checkpoint_filename
+		return checkpoint_path
 
 def train_one_epoch(
 	params: AttributeDict,
