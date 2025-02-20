@@ -169,7 +169,7 @@ def get_parser():
 	parser.add_argument(
 		"--learning-rate",
 		type=float,
-		default=2e-4,
+		default=5e-4,
 		help="Learning rate for Adam optimizer.",
 	)
 	parser.add_argument(
@@ -177,6 +177,25 @@ def get_parser():
 		type=int,
 		default=2,
 		help="Log audio in validation set during training."
+	)
+	total_steps = 1000 * 20
+	base_mult = 1.5
+	peak = 3
+	mult = 1
+	last_acc_multi = base_mult
+	for _ in range(peak - 1):
+		mult = mult + last_acc_multi
+		last_acc_multi = last_acc_multi * last_acc_multi
+	parser.add_argument( # ~ 20 steps per epoch 
+		"--scheduler_cos_T0",
+		type=int,
+		default= int(total_steps / mult)
+	)
+	parser.add_argument(
+		"--scheduler_cos_mult",
+		type=float,
+		default=base_mult,
+		help="multiply t0 to get next t"
 	)
 
 	return parser
@@ -505,7 +524,7 @@ class KeepLastNCheckpoints:
 		if not os.path.exists(save_dir):
 			os.makedirs(save_dir)
 
-	def Run(self, params, model, optimizer, scaler):
+	def Run(self, params, model, scaler, optimizer = None, scheduler = None):
 		"""
 		must run in rank0
 		"""
@@ -517,6 +536,7 @@ class KeepLastNCheckpoints:
 			params=params,
 			model=model,
 			optimizer=optimizer,
+			scheduler=scheduler,
 			scaler=scaler,
 			rank=0
 		)
@@ -533,6 +553,7 @@ def train_one_epoch(
 	model: Union[nn.Module, DDP],
 	tokenizer: Tokenizer,
 	optimizer: Optimizer,
+	scheduler: torch.optim.lr_scheduler.LRScheduler,
 	train_dl: torch.utils.data.DataLoader,
 	valid_dl: torch.utils.data.DataLoader,
 	scaler: GradScaler,
@@ -579,6 +600,7 @@ def train_one_epoch(
 			model=model,
 			params=params,
 			optimizer=optimizer,
+			scheduler=scheduler,
 			scaler=scaler,
 			rank=0,
 		)
@@ -620,6 +642,9 @@ def train_one_epoch(
 				scaler.step(optimizer)
 				scaler.update()
 				optimizer.zero_grad()
+				scheduler.step()
+				if tb_writer is not None:
+					tb_writer.add_scalar("train/learning_rate", scheduler.get_last_lr()[0], params.batch_idx_train)
 
 				loss_info = MetricsTracker()
 				loss_info["samples"] = batch_size
@@ -802,6 +827,12 @@ def run(rank, world_size, args):
 		model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
 	optimizer = torch.optim.Adam(model.parameters(), **params.model_args.optimizer)
+	scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+		optimizer,
+		T_0=args.scheduler_cos_T0,
+		T_mult=args.scheduler_cos_mult
+	)
+	# TODO: load scheduler from checkpoint
 
 	logging.info("About to create datamodule")
 
@@ -822,9 +853,9 @@ def run(rank, world_size, args):
 			valid_text.append(model_wrapper.Encode(j))
 			if len(valid_text) >= args.log_n_audio:
 				break
-	if tb_writer is not None and rank == 0:
-		for i, item in enumerate(valid_text):
-			tb_writer.add_text(f"valid/text{i}", item["text"])
+	# if tb_writer is not None and rank == 0:
+	# 	for i, item in enumerate(valid_text):
+	# 		tb_writer.add_text(f"valid/text{i}", item["text"])
 	del model_wrapper
 
 	scaler = GradScaler(enabled=params.use_fp16, init_scale=1.0)
@@ -832,6 +863,8 @@ def run(rank, world_size, args):
 		logging.info("Loading grad scaler state dict")
 		scaler.load_state_dict(checkpoints["grad_scaler"])
 
+	if world_size > 1:
+		torch.distributed.barrier()
 	for epoch in range(params.start_epoch, params.num_epochs + 1):
 		logging.info(f"Start epoch {epoch}")
 		fix_random_seed(params.seed + epoch - 1)
@@ -848,6 +881,7 @@ def run(rank, world_size, args):
 			model=model,
 			tokenizer=tokenizer,
 			optimizer=optimizer,
+			scheduler=scheduler,
 			train_dl=train_dl,
 			valid_dl=valid_dl,
 			scaler=scaler,
@@ -859,7 +893,7 @@ def run(rank, world_size, args):
 		)
 
 		if rank == 0 and (epoch % params.save_every_n == 0 or epoch == params.num_epochs):
-			filename = saving_last_epoch.Run(params, model, optimizer, scaler)
+			filename = saving_last_epoch.Run(params, model, scaler, optimizer=optimizer, scheduler=scheduler)
 
 			if params.best_train_epoch == params.cur_epoch:
 				saving_best_train.Run(params.cur_epoch, params.best_train_loss, filename)
