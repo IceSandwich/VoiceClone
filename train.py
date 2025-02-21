@@ -434,7 +434,7 @@ def compute_validation_loss(
 	valid_dl: torch.utils.data.DataLoader,
 	world_size: int = 1,
 	rank: int = 0,
-) -> typing.Tuple[MetricsTracker, torch.Tensor]:
+) -> typing.Tuple[MetricsTracker, torch.Tensor, float]:
 	"""Run the validation process with mel output."""
 	model.eval()
 	device = model.device if isinstance(model, DDP) else next(model.parameters()).device
@@ -496,9 +496,7 @@ def compute_validation_loss(
 		params.best_valid_epoch = params.cur_epoch
 		params.best_valid_loss = loss_value
 
-	params.last_loss_value = loss_value
-	params.last_loss_value_in_epoch = params.cur_epoch
-	return tot_loss, ret_mel
+	return tot_loss, ret_mel, loss_value
 
 @torch.inference_mode()
 def infer_one_batch(
@@ -521,8 +519,10 @@ class KeepBestNCheckpoints:
 		self.save_dir = save_dir
 		self.checkpoints: typing.List[typing.Tuple[float, str]] = []
 		
-		if not os.path.exists(self.save_dir):
-			os.makedirs(self.save_dir)
+		os.makedirs(self.save_dir, exist_ok=True)
+		infiles = os.listdir(self.save_dir)
+		if len(infiles) != 0:
+			raise Exception(f"{self.save_dir} is should be empty, but has file: {infiles}")
 
 	def Run(self, epoch: int, metric_value: float, model_filename: str):
 		"""
@@ -732,7 +732,7 @@ def train_one_epoch(
 
 		if params.batch_idx_train % params.valid_interval == 1:
 			logging.info("Computing validation loss")
-			valid_info, mel = compute_validation_loss( # mel = (tensor([[[2, 80, 860]]]), )
+			valid_info, mel, loss_valid_value = compute_validation_loss( # mel = (tensor([[[2, 80, 860]]]), )
 				params=params,
 				model=model,
 				tokenizer=tokenizer,
@@ -761,6 +761,10 @@ def train_one_epoch(
 						vocoder=vocoder
 					)
 					del model_wrapper
+
+			
+			params.last_loss_value = loss_valid_value
+			params.last_loss_value_in_epoch = params.cur_epoch
 			model.train()
 
 	loss_value = tot_loss["tot_loss"] / tot_loss["samples"]
@@ -940,6 +944,7 @@ def run(rank, world_size, args):
 
 		if rank == 0 and (epoch % params.save_every_n == 0 or epoch == params.num_epochs):
 			filename = saving_last_epoch.Run(params, model, scaler, optimizer=optimizer, scheduler=scheduler)
+			logging.info(f"current last loss value in epoch: {params.last_loss_value_in_epoch}, current epoch: {params.cur_epoch}")
 
 			if params.last_loss_value_in_epoch == params.cur_epoch:
 				saving_best_valid.Run(params.cur_epoch, params.last_loss_value, filename)
