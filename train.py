@@ -175,13 +175,13 @@ def get_parser():
 	parser.add_argument(
 		"--learning-rate",
 		type=float,
-		default=1e-3,
+		default=1e-4,
 		help="Learning rate for Adam optimizer.",
 	)
 	parser.add_argument(
 		"--learning_weight_decay",
 		type=float,
-		default=0.01,
+		default=0.001,
 	)
 	parser.add_argument(
 		"--log-n-audio",
@@ -331,6 +331,10 @@ def get_params():
 			"best_valid_loss": float("inf"),
 			"best_train_epoch": -1,
 			"best_valid_epoch": -1,
+			"last_loss_value_in_epoch": -1,
+			"last_loss_value": float("inf"),
+			"last_train_loss_in_epoch": -1,
+			"last_train_loss": float("inf"),
 			"batch_idx_train": -1,  # 0
 			"log_interval": 10,
 			"valid_interval": 1500,
@@ -517,8 +521,8 @@ class KeepBestNCheckpoints:
 		self.save_dir = save_dir
 		self.checkpoints: typing.List[typing.Tuple[float, str]] = []
 		
-		if not os.path.exists(save_dir):
-			os.makedirs(save_dir)
+		if not os.path.exists(self.save_dir):
+			os.makedirs(self.save_dir)
 
 	def Run(self, epoch: int, metric_value: float, model_filename: str):
 		"""
@@ -711,6 +715,7 @@ def train_one_epoch(
 				f"Epoch {params.cur_epoch}, batch {batch_idx}, "
 				f"global_batch_idx: {params.batch_idx_train}, "
 				f"batch size: {batch_size}, "
+				f"lr: {scheduler.get_last_lr()[0]}, "
 				f"loss[{loss_info}], tot_loss[{tot_loss}], "
 				+ (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
 			)
@@ -763,6 +768,8 @@ def train_one_epoch(
 	if params.train_loss < params.best_train_loss:
 		params.best_train_epoch = params.cur_epoch
 		params.best_train_loss = params.train_loss
+	params.last_train_loss_in_epoch = params.cur_epoch
+	params.last_train_loss = loss_value
 
 
 def run(rank, world_size, args):
@@ -788,7 +795,7 @@ def run(rank, world_size, args):
 
 	if rank == 0:
 		saving_best_train = KeepBestNCheckpoints("best-train", str(params.exp_dir / "best-train"), args.keep_nbest_train)
-		saving_best_valid = KeepBestNCheckpoints("best_valid", str(params.exp_dir / "best-valid"), args.keep_nbest_valid)
+		saving_best_valid = KeepBestNCheckpoints("best-valid", str(params.exp_dir / "best-valid"), args.keep_nbest_valid)
 		saving_last_epoch = KeepLastNCheckpoints(str(params.exp_dir / "last-epoch"), args.keep_nepochs)
 		logging.info(f"Best train checkpoints will save to {saving_best_train.save_dir}")
 		logging.info(f"Best validation checkpoints will save to {saving_best_valid.save_dir}")
@@ -934,11 +941,11 @@ def run(rank, world_size, args):
 		if rank == 0 and (epoch % params.save_every_n == 0 or epoch == params.num_epochs):
 			filename = saving_last_epoch.Run(params, model, scaler, optimizer=optimizer, scheduler=scheduler)
 
-			if hasattr(params, "last_loss_value_in_epoch") and params.last_loss_value_in_epoch == params.cur_epoch:
+			if params.last_loss_value_in_epoch == params.cur_epoch:
 				saving_best_valid.Run(params.cur_epoch, params.last_loss_value, filename)
 
-			if params.best_train_epoch == params.cur_epoch:
-				saving_best_train.Run(params.cur_epoch, params.best_train_loss, filename)
+			if params.last_train_loss_in_epoch == params.cur_epoch:
+				saving_best_train.Run(params.cur_epoch, params.last_train_loss, filename)
 
 	logging.info("Done!")
 
