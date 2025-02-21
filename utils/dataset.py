@@ -5,6 +5,7 @@ import random
 from lhotse import Recording, RecordingSet, SupervisionSegment, CutSet
 from lhotse.supervision import SupervisionSet
 import re
+import time
 
 # 数据集下是：
 # wav_folder
@@ -112,10 +113,16 @@ class RawDataset:
 			self.ReadCutSet()
 		return self.sampling_rate
 
-def split_train_valid_dataset(dataset: CutSet, validation_ratio: float) -> typing.Tuple[CutSet, CutSet]:
+def split_train_valid_dataset(dataset: CutSet, validation_ratio: float, seed: int = None) -> typing.Tuple[CutSet, CutSet]:
 	"""Split a dataset into train and valid sets."""
+	if seed is None:
+		seed = int(time.time())
+	random.seed(seed)
+	print(f"Using seed {seed}")
+	
 	length = len(dataset)
-	valid_samples_ids = random.sample(range(length), int(validation_ratio * length))
+	range_index = random.shuffle(list(range(length)))
+	valid_samples_ids = random.sample(range_index, int(validation_ratio * length))
 
 	valid_segment_ids = [ dataset[i].supervisions[0].id for i in valid_samples_ids ]
 	train_segment_ids = [ dataset[i].supervisions[0].id for i in range(length) if i not in valid_samples_ids ]

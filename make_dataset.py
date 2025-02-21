@@ -61,7 +61,7 @@ def main(args: argparse.Namespace):
 		cut_set.to_file(dataset_filename)
 		print(f"Dataset saved to {dataset_filename}")
 	else:
-		train_cut_set, valid_cut_set = split_train_valid_dataset(cut_set, args.validset_ratio)
+		train_cut_set, valid_cut_set = split_train_valid_dataset(cut_set, args.validset_ratio, seed=args.seed)
 		print(f"Dataset has {len(train_cut_set)} train samples and {len(valid_cut_set)} test samples.")
 
 		train_dataset_filename = os.path.join(args.output_dir, f"{args.dataset_name}_train.jsonl.gz")
@@ -78,6 +78,7 @@ def parse_args(args = None):
 	parser.add_argument("--sample_rate", type=int, default=None, help="The sample rate of wav files")
 	parser.add_argument("--validset_ratio", type=float, default=None, help="The ratio of validation set")
 	parser.add_argument("--dataset_name", type=str, default="baker_zh_cuts", help="The name of dataset")
+	parser.add_argument("--seed", type=int, help="Random seed for data splitting.")
 
 	RawDataset.ParseArgs(parser)
 	return parser.parse_args(args)

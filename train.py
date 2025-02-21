@@ -167,10 +167,21 @@ def get_parser():
 		help="Log audio in validation set during training."
 	)
 	parser.add_argument(
+		"--learning_type",
+		type=str,
+		default="adamw",
+		help="[adamw, adam]"
+	)
+	parser.add_argument(
 		"--learning-rate",
 		type=float,
-		default=2e-4,
+		default=1e-3,
 		help="Learning rate for Adam optimizer.",
+	)
+	parser.add_argument(
+		"--learning_weight_decay",
+		type=float,
+		default=0.01,
 	)
 	parser.add_argument(
 		"--log-n-audio",
@@ -178,23 +189,15 @@ def get_parser():
 		default=2,
 		help="Log audio in validation set during training."
 	)
-	total_steps = 1000 * 20
-	base_mult = 2
-	peak = 3
-	mult = 1
-	last_acc_multi = base_mult
-	for _ in range(peak - 1):
-		mult = mult + last_acc_multi
-		last_acc_multi = last_acc_multi * last_acc_multi
 	parser.add_argument( # ~ 20 steps per epoch 
 		"--scheduler_cos_T0",
 		type=int,
-		default= int(total_steps / mult)
+		default=1000,
 	)
 	parser.add_argument(
 		"--scheduler_cos_mult",
 		type=int,
-		default=base_mult,
+		default=2,
 		help="multiply t0 to get next t"
 	)
 	parser.add_argument(
@@ -202,6 +205,12 @@ def get_parser():
 		type=float,
 		default=1e-5,
 		help="min of scheduler"
+	)
+	parser.add_argument(
+		"--scheduler_auto_peak",
+		type=int, # 3
+		default=None,
+		help="calculate scheduler_cos_T0 by this peak automatically. Notice, this will ignore scheduler_cos_T0"
 	)
 
 	return parser
@@ -483,6 +492,8 @@ def compute_validation_loss(
 		params.best_valid_epoch = params.cur_epoch
 		params.best_valid_loss = loss_value
 
+	params.last_loss_value = loss_value
+	params.last_loss_value_in_epoch = params.cur_epoch
 	return tot_loss, ret_mel
 
 @torch.inference_mode()
@@ -500,7 +511,8 @@ def infer_one_batch(
 		writer.add_audio(f"valid/audio{idx}", waveform, params.batch_idx_train, sample_rate=params.data_args.sampling_rate)
 
 class KeepBestNCheckpoints:
-	def __init__(self, save_dir: str, n: int = 5):
+	def __init__(self, name: str, save_dir: str, n: int = 5):
+		self.name = name
 		self.n = n
 		self.save_dir = save_dir
 		self.checkpoints: typing.List[typing.Tuple[float, str]] = []
@@ -517,6 +529,7 @@ class KeepBestNCheckpoints:
 
 		heapq.heappush(self.checkpoints, (-metric_value, checkpoint_path))
 		copyfile(src=model_filename, dst=checkpoint_path)
+		logging.info(f"Saving {self.name} checkpoint to {checkpoint_path}")
 		
 		if len(self.checkpoints) > self.n:
 			_, worst_checkpoint = heapq.heappop(self.checkpoints)
@@ -774,8 +787,8 @@ def run(rank, world_size, args):
 	logging.info(f"Device: {device}")
 
 	if rank == 0:
-		saving_best_train = KeepBestNCheckpoints(str(params.exp_dir / "best-train"), args.keep_nbest_train)
-		saving_best_valid = KeepBestNCheckpoints(str(params.exp_dir / "best-valid"), args.keep_nbest_valid)
+		saving_best_train = KeepBestNCheckpoints("best-train", str(params.exp_dir / "best-train"), args.keep_nbest_train)
+		saving_best_valid = KeepBestNCheckpoints("best_valid", str(params.exp_dir / "best-valid"), args.keep_nbest_valid)
 		saving_last_epoch = KeepLastNCheckpoints(str(params.exp_dir / "last-epoch"), args.keep_nepochs)
 		logging.info(f"Best train checkpoints will save to {saving_best_train.save_dir}")
 		logging.info(f"Best validation checkpoints will save to {saving_best_valid.save_dir}")
@@ -796,6 +809,7 @@ def run(rank, world_size, args):
 
 		params.data_args.sampling_rate = stats["sampling_rate"]
 	params.model_args.optimizer.lr = args.learning_rate
+	params.model_args.optimizer.weight_decay = args.learning_weight_decay
 
 	logging.info(params)
 	print(params)
@@ -832,10 +846,27 @@ def run(rank, world_size, args):
 		logging.info("Using DDP")
 		model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
-	optimizer = torch.optim.Adam(model.parameters(), **params.model_args.optimizer)
+	optimizer_type: str = args.learning_type.lower()
+	if optimizer_type == "adamw":
+		logging.info(f"Using AdamW optimizer")
+		optimizer = torch.optim.AdamW(model.parameters(), **params.model_args.optimizer)
+	else:
+		logging.info(f"Using Adam optimizer")
+		optimizer = torch.optim.Adam(model.parameters(), **params.model_args.optimizer)
+	if args.scheduler_auto_peak is not None:
+		total_steps = args.num_epochs * 20
+		mult = 1
+		last_acc_multi = args.scheduler_cos_mult
+		for _ in range(args.scheduler_auto_peak - 1):
+			mult = mult + last_acc_multi
+			last_acc_multi = last_acc_multi * last_acc_multi
+		scheduler_t0 = int(total_steps / mult)
+		logging.info(f"Auto peak scheduler param: t0={scheduler_t0}, t_mult={args.scheduler_cos_mult}")
+	else:
+		scheduler_t0 = args.scheduler_cos_T0
 	scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
 		optimizer,
-		T_0=args.scheduler_cos_T0,
+		T_0=scheduler_t0,
 		T_mult=args.scheduler_cos_mult,
 		eta_min=args.scheduler_eta_min
 	)
@@ -857,7 +888,8 @@ def run(rank, world_size, args):
 	model_wrapper.device = device
 	for i in valid_text_batch:
 		for j in i:
-			valid_text.append(model_wrapper.Encode(j))
+			# valid_text.append(model_wrapper.Encode(j))
+			valid_text.append("PLACEHOLDER") # should remove this variable
 			if len(valid_text) >= args.log_n_audio:
 				break
 	# if tb_writer is not None and rank == 0:
@@ -902,11 +934,11 @@ def run(rank, world_size, args):
 		if rank == 0 and (epoch % params.save_every_n == 0 or epoch == params.num_epochs):
 			filename = saving_last_epoch.Run(params, model, scaler, optimizer=optimizer, scheduler=scheduler)
 
+			if hasattr(params, "last_loss_value_in_epoch") and params.last_loss_value_in_epoch == params.cur_epoch:
+				saving_best_valid.Run(params.cur_epoch, params.last_loss_value, filename)
+
 			if params.best_train_epoch == params.cur_epoch:
 				saving_best_train.Run(params.cur_epoch, params.best_train_loss, filename)
-
-			if params.best_valid_epoch == params.cur_epoch:
-				saving_best_valid.Run(params.cur_epoch, params.best_valid_loss, filename)
 
 	logging.info("Done!")
 
