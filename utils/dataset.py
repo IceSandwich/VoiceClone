@@ -119,10 +119,11 @@ def split_train_valid_dataset(dataset: CutSet, validation_ratio: float, seed: in
 		seed = int(time.time())
 	random.seed(seed)
 	print(f"Using seed {seed}")
-	
+
 	length = len(dataset)
-	range_index = random.shuffle(list(range(length)))
-	valid_samples_ids = random.sample(range_index, int(validation_ratio * length))
+	sample_indexs = list(range(length))
+	random.shuffle(sample_indexs)
+	valid_samples_ids = random.sample(sample_indexs, int(validation_ratio * length))
 
 	valid_segment_ids = [ dataset[i].supervisions[0].id for i in valid_samples_ids ]
 	train_segment_ids = [ dataset[i].supervisions[0].id for i in range(length) if i not in valid_samples_ids ]
