@@ -132,6 +132,11 @@ class AttributeDict(dict):
             tmp[k] = v
         return json.dumps(tmp, indent=indent, sort_keys=True)
 
+# from https://github.com/jaywalnut310/vit://github.com/jaywalnut310/vits/blob/main/commons.py
+def intersperse(sequence, item=0):
+    result = [item] * (len(sequence) * 2 + 1)
+    result[1::2] = sequence
+    return result
 
 # from https://github.com/espnet/espnet/blob/master/espnet2/gan_tts/utils/get_random_segments.py
 def get_random_segments(

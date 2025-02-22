@@ -5,6 +5,33 @@
 	"version": "0.2.0",
 	"configurations": [
 		{
+			"name":  "Change sample rate",
+			"type":  "debugpy",
+			"request":  "launch",
+			"program":  "change_sample_rate.py",
+			"args":[
+				"--wav_folder", "assets/raw_dataset/tvboy_denoised_mandarin_seed34751218",
+				"--output_folder", "assets/raw_dataset_resample/tvboy_denoised_mandarin_seed34751218",
+				"--sample_rate", "22050"
+			]
+		},
+		{
+			"name": "Make dataset",
+			"type": "debugpy",
+			"request": "launch",
+			"program": "make_dataset.py",
+			"args":[
+				"--wav_folder","assets/raw_dataset_resample/tvboy_denoised_mandarin_seed34751218",
+				"--label_text","assets/text/mandarin.txt",
+				"--output_dir","assets/dataset2",
+				"--language","mandarin",
+				"--speaker","tvboy_denoised_resample",
+				"--gender","boy",
+				"--validset_ratio","0.05",
+				"--seed", "1740110506",
+			]
+		},
+		{
 			"name": "Train",
 			"type": "debugpy",
 			"request": "launch",
@@ -29,31 +56,15 @@
 			]
 		},
 		{
-			"name": "Make dataset",
-			"type": "debugpy",
-			"request": "launch",
-			"program": "make_dataset.py",
-			"args":[
-				"--wav_folder","assets/raw_dataset_resample/tvboy_denoised_mandarin_seed34751218",
-				"--label_text","assets/text/mandarin.txt",
-				"--output_dir","assets/dataset2",
-				"--language","mandarin",
-				"--speaker","tvboy_denoised_resample",
-				"--gender","boy",
-				"--validset_ratio","0.05",
-				"--seed", "1740110506",
-			]
-		},
-		{
 			"name": "Infer",
 			"type": "debugpy",
 			"request": "launch",
 			"program": "infer.py",
 			"args":[
-				"--model","assets/train/exp-6/best-train/epoch-1591-1.3227.pt",
+				"--model","assets/train/kaggle/best-valid/epoch-701-2.2618.pt",
 				"--dataset_dir","assets/dataset",
 				"--vocoder","assets/model/vocoder/generator_v1",
-				"--text","您好啊，有什么需要我帮忙的吗？",
+				"--text","当夜幕降临，星光点点，伴随着微风拂面，我在静谧中感受着时光的流转，思念如涟漪荡漾，梦境如画卷展开，我与自然融为一体，沉静在这片宁静的美丽之中，感受着生命的奇迹与温柔.",
 				"--output","output.wav"
 			]
 		},
@@ -71,14 +82,40 @@
 			]
 		},
 		{
-			"name":  "Change sample rate",
-			"type":  "debugpy",
-			"request":  "launch",
-			"program":  "change_sample_rate.py",
-			"args":[
-				"--wav_folder", "assets/raw_dataset/tvboy_denoised_mandarin_seed34751218",
-				"--output_folder", "assets/raw_dataset_resample/tvboy_denoised_mandarin_seed34751218",
-				"--sample_rate", "22050"
+			"name": "Validation",
+			"type": "debugpy",
+			"request": "launch",
+			"program": "validation.py",
+			"args": [
+				"--model", "assets/train/exp-10/best-valid/epoch-518-2.3423.pt",
+				"--dataset_dir", "assets/dataset",
+				"--vocoder", "assets/model/vocoder/generator_v2",
+				"--output", "assets/validation/exp-10/epoch-518"
+			]
+		},
+		{
+			"name": "Export ONNX",
+			"type": "debugpy",
+			"request": "launch",
+			"program": "export.py",
+			"args": [
+				"--checkpoint","assets/train/kaggle/best-valid/epoch-101-2.2233.pt",
+				"--dataset_dir","assets/dataset",
+				"--output_dir","assets/exports/kaggle/epoch-101"
+			]
+		},
+		{
+			"name": "Infer ONNX",
+			"type": "debugpy",
+			"request": "launch",
+			"program": "infer_onnx.py",
+			"args": [
+				"--acoustic-model", "assets/exports/kaggle/epoch-701/model-steps-3.onnx",
+				"--vocoder","assets/model/vocoder/hifigan_v2.onnx",
+				"--tokens", "assets/dataset/tokens.txt",
+				"--lexicon", "assets/dataset/lexicon.txt",
+				"--input-text", "当夜幕降临，星光点点，伴随着微风拂面，我在静谧中感受着时光的流转，思念如涟漪荡漾，梦境如画卷展开，我与自然融为一体，沉静在这片宁静的美丽之中，感受着生命的奇迹与温柔。",
+				"--output-wav", "output_onnx.wav"
 			]
 		}
 	]

@@ -7,3 +7,6 @@
 /assets/raw_dataset
 /assets/raw_dataset_resample
 /assets/model/vocoder/generator_v1
+/assets/executable
+/assets/validation
+/assets/exports
