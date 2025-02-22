@@ -2,7 +2,9 @@ import os, json, argparse, torch
 from lhotse import Fbank, FbankConfig
 from utils.tokens import generate_token_list, convert_text_to_token, write_lexicon
 from utils.dataset import RawDataset, split_train_valid_dataset
-from utils.fbank import compute_cmvn
+from utils.fbank import compute_cmvn, get_feature_extractor
+from lhotse import LilcomChunkyWriter
+from lhotse import validate
 
 def main(args: argparse.Namespace):
 	dataset = RawDataset(args)
@@ -16,9 +18,8 @@ def main(args: argparse.Namespace):
 
 	os.makedirs(args.output_dir, exist_ok=True)
 
-	feature_extractor = Fbank(FbankConfig(
-		sampling_rate=sampling_rate
-	))
+	assert sampling_rate == 22050, "only support sampling rate 22050 right now."
+	feature_extractor = get_feature_extractor()
 
 	feature_filename = os.path.join(args.output_dir, "features")
 	# Add torch code to suppress the following warning
@@ -28,6 +29,7 @@ def main(args: argparse.Namespace):
 		feature_extractor,
 		feature_filename,
 		num_jobs=4,
+		storage_type=LilcomChunkyWriter
 	)
 	cut_set.describe()
 	print(f"Features saved to {feature_filename}")
@@ -55,6 +57,8 @@ def main(args: argparse.Namespace):
 		tokens = convert_text_to_token(cut.supervisions[0].text)
 		cut.tokens = tokens
 		cut.supervisions[0].normalized_text = cut.supervisions[0].text
+
+	validate(cut_set)
 
 	if args.validset_ratio is None:
 		dataset_filename = os.path.join(args.output_dir, f"{args.dataset_name}_train.jsonl.gz")

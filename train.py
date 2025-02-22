@@ -189,6 +189,12 @@ def get_parser():
 		default=2,
 		help="Log audio in validation set during training."
 	)
+	parser.add_argument(
+		"--scheduler_type",
+		type=str,
+		default=None,
+		help="[none, cos, 1cycle]"
+	)
 	parser.add_argument( # ~ 20 steps per epoch 
 		"--scheduler_cos_T0",
 		type=int,
@@ -370,7 +376,8 @@ def load_checkpoint_if_available(
 	  Return a dict containing previously saved training info.
 	"""
 	if params.start_epoch > 1:
-		filename = params.exp_dir / f"epoch-{params.start_epoch-1}.pt"
+		# filename = params.exp_dir / f"epoch-{params.start_epoch-1}.pt"
+		filename = Path(params.pretrained_checkpoint)
 	else:
 		return None
 
@@ -518,21 +525,33 @@ class KeepBestNCheckpoints:
 		self.n = n
 		self.save_dir = save_dir
 		self.checkpoints: typing.List[typing.Tuple[float, str]] = []
+		self.minvalue = float("inf")
 		
 		os.makedirs(self.save_dir, exist_ok=True)
 		infiles = os.listdir(self.save_dir)
 		if len(infiles) != 0:
 			raise Exception(f"{self.save_dir} is should be empty, but has file: {infiles}")
 
-	def Run(self, epoch: int, metric_value: float, model_filename: str):
+	def Run(self, params, model, scaler, metric_value: float, optimizer: typing.Union[Optimizer, None] = None, scheduler: typing.Union[torch.optim.lr_scheduler.LRScheduler, None] = None):
 		"""
 		must run in rank0
 		"""
-		checkpoint_name = f"epoch-{epoch}-{metric_value:.4f}.pt"
+		checkpoint_name = f"epoch-{params.cur_epoch}-{metric_value:.4f}.pt"
 		checkpoint_path = os.path.join(self.save_dir, checkpoint_name)
 
+		if len(self.checkpoints) >= self.n and -heapq.nsmallest(1, self.checkpoints)[0][0] < metric_value:
+			return
+
 		heapq.heappush(self.checkpoints, (-metric_value, checkpoint_path))
-		copyfile(src=model_filename, dst=checkpoint_path)
+		save_checkpoint(
+			filename=checkpoint_path,
+			params=params,
+			model=model,
+			optimizer=optimizer,
+			scheduler=scheduler,
+			scaler=scaler,
+			rank=0
+		)
 		logging.info(f"Saving {self.name} checkpoint to {checkpoint_path}")
 		
 		if len(self.checkpoints) > self.n:
@@ -540,6 +559,9 @@ class KeepBestNCheckpoints:
 			os.remove(worst_checkpoint)  # Remove the worst checkpoint
 
 class KeepLastNCheckpoints:
+	"""
+	keep n*2 checkpoints and delete n checkpoints at once
+	"""
 	def __init__(self, save_dir: str, n: int = 5):
 		self.save_dir = save_dir
 		self.n = n
@@ -547,7 +569,7 @@ class KeepLastNCheckpoints:
 		if not os.path.exists(save_dir):
 			os.makedirs(save_dir)
 
-	def Run(self, params, model, scaler, optimizer = None, scheduler = None):
+	def Run(self, params, model, scaler, optimizer = None, scheduler = None, lastEpoch = False):
 		"""
 		must run in rank0
 		"""
@@ -564,10 +586,12 @@ class KeepLastNCheckpoints:
 			rank=0
 		)
 		self.checkpoints.append(checkpoint_path)
+		logging.info(f"Saving lastN checkpoint to {checkpoint_path}")
 
-		if len(self.checkpoints) > self.n:
-			worst_checkpoint = self.checkpoints.pop(0)
-			os.remove(worst_checkpoint)   # Remove the worst checkpoint
+		if not lastEpoch and len(self.checkpoints) > self.n * 2:
+			for x in self.checkpoints[:len(self.checkpoints) // 2]:
+				os.remove(x)
+			self.checkpoints = self.checkpoints[len(self.checkpoints) // 2:]
 
 		return checkpoint_path
 
@@ -665,9 +689,13 @@ def train_one_epoch(
 				scaler.step(optimizer)
 				scaler.update()
 				optimizer.zero_grad()
-				scheduler.step()
+				if scheduler is not None:
+					scheduler.step()
+					learning_rate = scheduler.get_last_lr()[0]
+				else:
+					learning_rate = params.model_args.optimizer.lr
 				if tb_writer is not None:
-					tb_writer.add_scalar("train/learning_rate", scheduler.get_last_lr()[0], params.batch_idx_train)
+					tb_writer.add_scalar("train/learning_rate", learning_rate, params.batch_idx_train)
 
 				loss_info = MetricsTracker()
 				loss_info["samples"] = batch_size
@@ -715,7 +743,7 @@ def train_one_epoch(
 				f"Epoch {params.cur_epoch}, batch {batch_idx}, "
 				f"global_batch_idx: {params.batch_idx_train}, "
 				f"batch size: {batch_size}, "
-				f"lr: {scheduler.get_last_lr()[0]}, "
+				f"lr: {learning_rate}, "
 				f"loss[{loss_info}], tot_loss[{tot_loss}], "
 				+ (f"grad_scale: {scaler._scale.item()}" if params.use_fp16 else "")
 			)
@@ -864,23 +892,32 @@ def run(rank, world_size, args):
 	else:
 		logging.info(f"Using Adam optimizer")
 		optimizer = torch.optim.Adam(model.parameters(), **params.model_args.optimizer)
-	if args.scheduler_auto_peak is not None:
-		total_steps = args.num_epochs * 20
-		mult = 1
-		last_acc_multi = args.scheduler_cos_mult
-		for _ in range(args.scheduler_auto_peak - 1):
-			mult = mult + last_acc_multi
-			last_acc_multi = last_acc_multi * last_acc_multi
-		scheduler_t0 = int(total_steps / mult)
-		logging.info(f"Auto peak scheduler param: t0={scheduler_t0}, t_mult={args.scheduler_cos_mult}")
+	if args.scheduler_type == "cos":
+		if args.scheduler_auto_peak is not None:
+			total_steps = args.num_epochs * 20
+			mult = 1
+			last_acc_multi = args.scheduler_cos_mult
+			for _ in range(args.scheduler_auto_peak - 1):
+				mult = mult + last_acc_multi
+				last_acc_multi = last_acc_multi * last_acc_multi
+			scheduler_t0 = int(total_steps / mult)
+			logging.info(f"Auto peak scheduler param: t0={scheduler_t0}, t_mult={args.scheduler_cos_mult}")
+		else:
+			scheduler_t0 = args.scheduler_cos_T0
+		scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+			optimizer,
+			T_0=scheduler_t0,
+			T_mult=args.scheduler_cos_mult,
+			eta_min=args.scheduler_eta_min
+		)
+	elif args.scheduler_type == "1cycle":
+		scheduler = torch.optim.lr_scheduler.OneCycleLR(
+			optimizer=optimizer,
+			max_lr=args.learning_rate,
+			total_steps=args.num_epochs * 28
+		)
 	else:
-		scheduler_t0 = args.scheduler_cos_T0
-	scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-		optimizer,
-		T_0=scheduler_t0,
-		T_mult=args.scheduler_cos_mult,
-		eta_min=args.scheduler_eta_min
-	)
+		scheduler = None
 	# TODO: load scheduler from checkpoint
 
 	logging.info("About to create datamodule")
@@ -942,15 +979,15 @@ def run(rank, world_size, args):
 			valid_text=valid_text,
 		)
 
-		if rank == 0 and (epoch % params.save_every_n == 0 or epoch == params.num_epochs):
-			filename = saving_last_epoch.Run(params, model, scaler, optimizer=optimizer, scheduler=scheduler)
-			logging.info(f"current last loss value in epoch: {params.last_loss_value_in_epoch}, current epoch: {params.cur_epoch}")
+		if rank == 0:
+			if epoch % params.save_every_n == 0 or epoch == params.num_epochs:
+				saving_last_epoch.Run(params, model, scaler, optimizer=optimizer, scheduler=scheduler, lastEpoch=(epoch == params.num_epochs))
 
 			if params.last_loss_value_in_epoch == params.cur_epoch:
-				saving_best_valid.Run(params.cur_epoch, params.last_loss_value, filename)
+				saving_best_valid.Run(params, model, scaler, params.last_loss_value, optimizer=optimizer, scheduler=scheduler)
 
 			if params.last_train_loss_in_epoch == params.cur_epoch:
-				saving_best_train.Run(params.cur_epoch, params.last_train_loss, filename)
+				saving_best_train.Run(params, model, scaler, params.last_train_loss, optimizer=optimizer, scheduler=scheduler)
 
 	logging.info("Done!")
 

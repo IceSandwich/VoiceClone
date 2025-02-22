@@ -1,0 +1,85 @@
+{
+	// 使用 IntelliSense 了解相关属性。 
+	// 悬停以查看现有属性的描述。
+	// 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Train",
+			"type": "debugpy",
+			"request": "launch",
+			"program": "train.py",
+			"console": "integratedTerminal",
+			"args": [
+				"--exp-dir", "assets/train/exp-10",
+				"--num-epochs", "1000",
+				"--num-workers", "2",
+				"--manifest-dir", "assets/dataset",
+				"--tokens", "assets/dataset/tokens.txt",
+				"--cmvn","assets/dataset/cmvn.json",
+				"--drop-last","0",
+				"--vocoder-checkpoint","assets/model/vocoder/generator_v2",
+				"--pretrained-checkpoint","assets/train/exp-9/best-valid/epoch-570-2.3461.pt",
+				"--scheduler_auto_peak", "1",
+				"--scheduler_type", "1cycle",
+				"--start-epoch", "1",
+				"--learning-rate", "0.0001",
+				"--learning_weight_decay", "0.01",
+				"--learning_type", "adamw"
+			]
+		},
+		{
+			"name": "Make dataset",
+			"type": "debugpy",
+			"request": "launch",
+			"program": "make_dataset.py",
+			"args":[
+				"--wav_folder","assets/raw_dataset_resample/tvboy_denoised_mandarin_seed34751218",
+				"--label_text","assets/text/mandarin.txt",
+				"--output_dir","assets/dataset2",
+				"--language","mandarin",
+				"--speaker","tvboy_denoised_resample",
+				"--gender","boy",
+				"--validset_ratio","0.05",
+				"--seed", "1740110506",
+			]
+		},
+		{
+			"name": "Infer",
+			"type": "debugpy",
+			"request": "launch",
+			"program": "infer.py",
+			"args":[
+				"--model","assets/train/exp-6/best-train/epoch-1591-1.3227.pt",
+				"--dataset_dir","assets/dataset",
+				"--vocoder","assets/model/vocoder/generator_v1",
+				"--text","您好啊，有什么需要我帮忙的吗？",
+				"--output","output.wav"
+			]
+		},
+		{
+			"name": "Infer baker",
+			"type": "debugpy",
+			"request": "launch",
+			"program": "infer.py",
+			"args": [
+				"--model","../bakertts/epoch-2000.pt",
+				"--dataset_dir","../bakertts",
+				"--vocoder","assets/model/vocoder/generator_v2",
+				"--text","您好啊，有什么需要我帮忙的吗？",
+				"--output","output.wav"
+			]
+		},
+		{
+			"name":  "Change sample rate",
+			"type":  "debugpy",
+			"request":  "launch",
+			"program":  "change_sample_rate.py",
+			"args":[
+				"--wav_folder", "assets/raw_dataset/tvboy_denoised_mandarin_seed34751218",
+				"--output_folder", "assets/raw_dataset_resample/tvboy_denoised_mandarin_seed34751218",
+				"--sample_rate", "22050"
+			]
+		}
+	]
+}

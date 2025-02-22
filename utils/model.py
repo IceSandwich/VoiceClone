@@ -134,7 +134,10 @@ class ModelBuilder:
 	def LoadCMVN(self, cmvn_filename: str):
 		cmvn = ReadCMVN(cmvn_filename)
 		self.mel_mean, self.mel_std = cmvn["fbank_mean"], cmvn["fbank_std"]
-		self.sampling_rate = cmvn["sampling_rate"]
+		if "sampling_rate" in cmvn:
+			self.sampling_rate = cmvn["sampling_rate"]
+		else:
+			self.sampling_rate = None
 
 	def GetSamplingRate(self):
 		"""

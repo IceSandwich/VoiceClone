@@ -52,7 +52,11 @@ def main(args):
 	cmvn_filename = os.path.join(args.dataset_dir, 'cmvn.json')
 	builder.LoadCMVN(cmvn_filename)
 	sampling_rate = builder.GetSamplingRate()
-	print(f"Using sampling rate: {sampling_rate}")
+	if sampling_rate is None:
+		print(f"Sampling rate assumes as 22050")
+		sampling_rate = 22050
+	else:
+		print(f"Using sampling rate: {sampling_rate}")
 
 	model = builder.BuildModel()
 	model.LoadCheckpoint(args.model)

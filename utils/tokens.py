@@ -5,8 +5,15 @@ import re
 from typing import List
 
 import jieba, torch
-from pypinyin import Style, lazy_pinyin, pinyin_dict, phrases_dict, pinyin_dict
+from pypinyin import Style, lazy_pinyin, pinyin_dict, phrases_dict, pinyin_dict, load_phrases_dict
 from icefall.tokenizer import Tokenizer
+
+load_phrases_dict(
+    {
+        "行长": [["hang2"], ["zhang3"]],
+        "银行行长": [["yin2"], ["hang2"], ["hang2"], ["zhang3"]],
+    }
+)
 
 whiter_space_re = re.compile(r"\s+")
 

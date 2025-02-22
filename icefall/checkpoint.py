@@ -72,7 +72,7 @@ def save_checkpoint(
     if rank != 0:
         return
 
-    logging.info(f"Saving checkpoint to {filename}")
+    # logging.info(f"Saving checkpoint to {filename}")
 
     if isinstance(model, DDP):
         model = model.module

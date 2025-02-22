@@ -58,6 +58,7 @@ class RawDataset:
 
 	def read(self):
 		audio_filename: typing.List[str] = [f for f in os.listdir(self.args.wav_folder) if f.endswith('.wav')]
+		audio_filename = sorted(audio_filename, key=lambda x: int(x[:-4]))
 		audio_path = [ os.path.join(self.args.wav_folder, f) for f in audio_filename ]
 		with open(self.args.label_text, 'r', encoding='utf-8') as f:
 			transcription_lines = [ x.strip() for x in f.readlines() if x.strip() != "" ]
