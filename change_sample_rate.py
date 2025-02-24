@@ -3,6 +3,7 @@ import os
 from tqdm import tqdm
 
 def main(args):
+	os.makedirs(args.output_folder, exist_ok=True)
 	for x in tqdm(os.listdir(args.wav_folder)):
 		srcFilename = os.path.join(args.wav_folder, x)
 		dstFilename = os.path.join(args.output_folder, x)

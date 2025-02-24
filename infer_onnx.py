@@ -197,6 +197,10 @@ def convert_word_to_tokens(word2tokens: Dict[str, List[str]], word: str) -> List
 	if word in word2tokens:
 		return word2tokens[word]
 
+	upper = word.upper()
+	if len(upper) == 1 and ord('A') <= ord(upper[0]) and ord(upper[0]) <= ord('Z'): # expand token
+		return ['letter' + upper]
+
 	if len(word) == 1:
 		return []
 
@@ -244,6 +248,11 @@ def main():
 	for s in seg:
 		if s in token2id:
 			tokens.append(s)
+			continue
+
+		upper = s.upper()
+		if len(upper) == 1 and ord('A') <= ord(upper[0]) and ord(upper[0]) <= ord('Z'): # expand token
+			tokens.append('letter' + upper)
 			continue
 
 		t = convert_word_to_tokens(word2tokens, s)

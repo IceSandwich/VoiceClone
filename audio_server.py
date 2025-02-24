@@ -3,7 +3,7 @@ import argparse
 from infer_onnx import read_tokens, read_lexicon, normalize_text, convert_word_to_tokens, OnnxHifiGANModel, OnnxModel
 from icefall.utils import intersperse
 import jieba
-import torch
+import torch, typing
 import soundfile as sf
 
 app = Flask(__name__)
@@ -67,6 +67,11 @@ class Model:
 			if s in self.token2id:
 				tokens.append(s)
 				continue
+			
+			upper = s.upper()
+			if len(upper) == 1 and ord('A') <= ord(upper[0]) and ord(upper[0]) <= ord('Z'): # expand token
+				tokens.append('letter' + upper)
+				continue
 
 			t = convert_word_to_tokens(self.word2tokens, s)
 			if t:
@@ -74,7 +79,7 @@ class Model:
     
 		return tokens
 	
-	def tokens2tensor(self, tokens: list[str]):
+	def tokens2tensor(self, tokens: typing.List[str]):
 		x = []
 		for t in tokens:
 			if t in self.token2id:
@@ -88,9 +93,9 @@ class Model:
 	def GetSampleRate(self):
 		return self.model.sample_rate
 
-	def ForwardWithTokens(self, tokens: list[str]):
-		input = self.tokens2tensor(tokens)
-		mel = self.model(input)
+	def ForwardWithTokens(self, tokens: typing.List[str]):
+		input_tensor = self.tokens2tensor(tokens)
+		mel = self.model(input_tensor)
 		audio = self.vocoder(mel)
 		audio = audio.squeeze()
 		return audio
@@ -117,6 +122,10 @@ def text_to_speech():
 		"PCM_16"
 	)
 	return send_file("tmp.wav", mimetype=f"audio/wav")
+
+@app.route('/audio/speech', methods=['POST'])
+def old_interface():
+	return text_to_speech()
 
 if __name__ == '__main__':
 	args = parse_arguments()

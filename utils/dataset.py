@@ -3,7 +3,9 @@ import argparse
 import typing
 import random
 from lhotse import Recording, RecordingSet, SupervisionSegment, CutSet
+from lhotse.cut import Cut
 from lhotse.supervision import SupervisionSet
+from .tokens import convert_text_to_token, normalize_punctuations
 import re
 import time
 
@@ -55,30 +57,60 @@ class RawDataset:
 			type=str, 
 			help="The gender of speaker"
 		)
+		parser.add_argument(
+			"--skip_alphanumeric",
+			type=bool,
+			default=False,
+		)
 
 	def read(self):
 		audio_filename: typing.List[str] = [f for f in os.listdir(self.args.wav_folder) if f.endswith('.wav')]
 		audio_filename = sorted(audio_filename, key=lambda x: int(x[:-4]))
 		audio_path = [ os.path.join(self.args.wav_folder, f) for f in audio_filename ]
-		with open(self.args.label_text, 'r', encoding='utf-8') as f:
-			transcription_lines = [ x.strip() for x in f.readlines() if x.strip() != "" ]
-			if len(audio_filename) != len(transcription_lines):
-				print(f"[Error] The number of audio is not same as the transcript!!!")
-				print(f"[Error] The number of audio in folder({self.args.wav_folder}) is {len(audio_filename)}.")
-				print(f"[Error] The non-blank lines of transcript of file({self.args.label_text}) is {len(transcription_lines)}.")
-				raise Exception("the number of audio and transcript doesn't match.")
-		print("Got audio files:", len(audio_filename))
-		return audio_path, audio_filename, transcription_lines
+		ret = {
+			"audio_filename": audio_filename,
+			"audio_path": audio_path,
+		}
+
+		self.isv2 = 'v2' in os.path.basename(self.args.label_text)
+
+		if self.isv2:
+			print(f"The label file is v2 format. If it's not, please don't include v2 in its name.")
+			def parse_v2_dataset(filename: str):
+				dataset: typing.List[typing.Tuple[str, str]] = []
+				with open(filename, 'r', encoding='utf-8') as f:
+					lines = f.readlines()
+					for i in range(0, len(lines), 2):
+						text = lines[i].strip().strip('\n')
+						phome = lines[i+1].strip().strip('\n')
+						dataset.append((text, phome))
+				return dataset
+			dataset = parse_v2_dataset(self.args.label_text)
+			transcription_lines = [ x[0] for x in dataset ]
+			tokens = [ x[1] for x in dataset ]
+			ret['transcription_lines'] = transcription_lines
+			ret['tokens'] = tokens
+		else:
+			with open(self.args.label_text, 'r', encoding='utf-8') as f:
+				transcription_lines = [ x.strip() for x in f.readlines() if x.strip() != "" ]
+				if len(audio_filename) != len(transcription_lines):
+					print(f"[Error] The number of audio is not same as the transcript!!!")
+					print(f"[Error] The number of audio in folder({self.args.wav_folder}) is {len(audio_filename)}.")
+					print(f"[Error] The non-blank lines of transcript of file({self.args.label_text}) is {len(transcription_lines)}.")
+					raise Exception("the number of audio and transcript doesn't match.")
+			print("Got audio files:", len(audio_filename))
+			ret["transcription_lines"] = transcription_lines
+		return ret
 	
 	def ReadCutSet(self):
-		audio_paths, audio_filenames, transcription_lines = self.read()
+		readinfo = self.read()
 
 		recordings: typing.List[Recording] = []
 		segments: typing.List[SupervisionSegment] = []
 		self.sampling_rate = 100000
 
-		for idx, (audio_path, audio_filename, transcription) in enumerate(zip(audio_paths, audio_filenames, transcription_lines)):
-			if contains_alphanumeric(transcription):
+		for idx, (audio_path, audio_filename, transcription) in enumerate(zip(readinfo["audio_path"], readinfo["audio_filename"], readinfo["transcription_lines"])):
+			if self.args.skip_alphanumeric and contains_alphanumeric(transcription):
 				print(f"Skip {transcription}")
 				continue
 
@@ -107,7 +139,25 @@ class RawDataset:
 			supervisions=supervision_set
 		)
 
+		if self.isv2:
+			mapping = { k: v for (k, v) in zip(readinfo["transcription_lines"], readinfo["tokens"]) }
+			for cut in cut_set:
+				cut: Cut
+				cut.tokens = normalize_punctuations(mapping[cut.supervisions[0].text]).split(' ')
+				cut.supervisions[0].normalized_text = normalize_punctuations(cut.supervisions[0].text)
+		else:
+			for cut in cut_set:
+				tokens = convert_text_to_token(cut.supervisions[0].text)
+				cut.tokens = tokens
+				cut.supervisions[0].normalized_text = cut.supervisions[0].text
+
 		return cut_set
+	
+	def IsV2(self):
+		return self.isv2
+	
+	def GetV2TokenFilename(self):
+		return os.path.splitext(self.args.label_text)[0] + "_tokens.txt"
 	
 	def GetSamplingRate(self) -> float:
 		if not hasattr(self,'sampling_rate'):

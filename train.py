@@ -218,6 +218,11 @@ def get_parser():
 		default=None,
 		help="calculate scheduler_cos_T0 by this peak automatically. Notice, this will ignore scheduler_cos_T0"
 	)
+	parser.add_argument(
+		"--safety_add_tokens",
+		action="store_true",
+		help="assume first n token in pretrained checkpoint, and last tokens are new added."
+	)
 
 	return parser
 
@@ -356,7 +361,7 @@ def get_model(params):
 
 
 def load_checkpoint_if_available(
-	params: AttributeDict, model: nn.Module
+	params: AttributeDict, model: nn.Module, safety_add_tokens: bool = False
 ) -> Optional[Dict[str, Any]]:
 	"""Load checkpoint from file.
 
@@ -383,7 +388,7 @@ def load_checkpoint_if_available(
 
 	assert filename.is_file(), f"{filename} does not exist!"
 
-	saved_params = load_checkpoint(filename, model=model)
+	saved_params = load_checkpoint(filename, model=model, safety_add_tokens=safety_add_tokens)
 
 	keys = [
 		"best_train_epoch",
@@ -868,9 +873,9 @@ def run(rank, world_size, args):
 
 	if params.start_epoch == 1 and args.pretrained_checkpoint is not None:
 		logging.info(f"Loading pretrained checkpoint {args.pretrained_checkpoint}")
-		checkpoints = load_checkpoint(args.pretrained_checkpoint, model=model)
+		checkpoints = load_checkpoint(args.pretrained_checkpoint, model=model, safety_add_tokens=args.safety_add_tokens)
 	else:
-		checkpoints = load_checkpoint_if_available(params=params, model=model)
+		checkpoints = load_checkpoint_if_available(params=params, model=model, safety_add_tokens=args.safety_add_tokens)
 	
 	if IsWindows:
 		pathlib.PosixPath = temp
@@ -914,7 +919,8 @@ def run(rank, world_size, args):
 		scheduler = torch.optim.lr_scheduler.OneCycleLR(
 			optimizer=optimizer,
 			max_lr=args.learning_rate,
-			total_steps=args.num_epochs * 28
+			total_steps=args.num_epochs * 25,
+			pct_start=0.2,
 		)
 	else:
 		scheduler = None

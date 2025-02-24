@@ -5,6 +5,7 @@ from utils.dataset import RawDataset, split_train_valid_dataset
 from utils.fbank import compute_cmvn, get_feature_extractor
 from lhotse import LilcomChunkyWriter
 from lhotse import validate
+import shutil
 
 def main(args: argparse.Namespace):
 	dataset = RawDataset(args)
@@ -18,10 +19,10 @@ def main(args: argparse.Namespace):
 
 	os.makedirs(args.output_dir, exist_ok=True)
 
-	assert sampling_rate == 22050, "only support sampling rate 22050 right now."
+	assert sampling_rate == 22050, "feature extractor only support sampling rate 22050 right now. different framerate need different hifigan."
 	feature_extractor = get_feature_extractor()
 
-	feature_filename = os.path.join(args.output_dir, "features")
+	feature_filename = os.path.join(args.output_dir, "features" + "_valid" if args.only_valid else "")
 	# Add torch code to suppress the following warning
 	# WARNING:root:num_jobs is > 1 and torch's number of threads is > 1 as well: For certain configs this can result in a never ending computation. If this happens, use torch.set_num_threads(1) to circumvent this.
 	torch.set_num_threads(1)
@@ -34,34 +35,35 @@ def main(args: argparse.Namespace):
 	cut_set.describe()
 	print(f"Features saved to {feature_filename}")
 
-	cmvn = compute_cmvn(cut_set)
-	cmvn["sampling_rate"] = sampling_rate
-	stats_filename = os.path.join(args.output_dir, "cmvn.json")
-	with open(stats_filename, 'w') as f:
-		json.dump(cmvn, f, indent = 4)
-	print(f"Stats saved to {stats_filename}")
+	if args.only_valid is False:
+		cmvn = compute_cmvn(cut_set)
+		cmvn["sampling_rate"] = sampling_rate
+		stats_filename = os.path.join(args.output_dir, "cmvn.json")
+		with open(stats_filename, 'w') as f:
+			json.dump(cmvn, f, indent = 4)
+		print(f"Stats saved to {stats_filename}")
 
-	token_list = generate_token_list()
-	token_filename = os.path.join(args.output_dir, "tokens.txt")
-	with open(token_filename, "w", encoding="utf-8") as f:
-		for indx, token in enumerate(token_list):
-			f.write(f"{token} {indx}\n")
-	print(f"Tokens saved to {token_filename}")
+		token_filename = os.path.join(args.output_dir, "tokens.txt")
+		if dataset.IsV2():
+			v2token_filename = dataset.GetV2TokenFilename()
+			assert os.path.exists(v2token_filename), f"V2 token file {v2token_filename} not found."
+			shutil.copyfile(v2token_filename, token_filename)
+		else:
+			token_list = generate_token_list()
+			with open(token_filename, "w", encoding="utf-8") as f:
+				for indx, token in enumerate(token_list):
+					f.write(f"{token} {indx}\n")
+		print(f"Tokens saved to {token_filename}")
 
-	lexicon_filename = os.path.join(args.output_dir, "lexicon.txt")
-	write_lexicon(lexicon_filename)
-	print(f"Lexicon saved to {lexicon_filename}")
-
-	# Convert text to token
-	for cut in cut_set:
-		tokens = convert_text_to_token(cut.supervisions[0].text)
-		cut.tokens = tokens
-		cut.supervisions[0].normalized_text = cut.supervisions[0].text
+		lexicon_filename = os.path.join(args.output_dir, "lexicon.txt")
+		write_lexicon(lexicon_filename)
+		print(f"Lexicon saved to {lexicon_filename}")
 
 	validate(cut_set)
 
 	if args.validset_ratio is None:
-		dataset_filename = os.path.join(args.output_dir, f"{args.dataset_name}_train.jsonl.gz")
+		setname = "valid" if args.only_valid else "train"
+		dataset_filename = os.path.join(args.output_dir, f"{args.dataset_name}_{setname}.jsonl.gz")
 		cut_set.to_file(dataset_filename)
 		print(f"Dataset saved to {dataset_filename}")
 	else:
@@ -83,6 +85,7 @@ def parse_args(args = None):
 	parser.add_argument("--validset_ratio", type=float, default=None, help="The ratio of validation set")
 	parser.add_argument("--dataset_name", type=str, default="baker_zh_cuts", help="The name of dataset")
 	parser.add_argument("--seed", type=int, help="Random seed for data splitting.")
+	parser.add_argument("--only_valid", action="store_true", help="output valid set only when validset_ratio doesn't set.")
 
 	RawDataset.ParseArgs(parser)
 	return parser.parse_args(args)
